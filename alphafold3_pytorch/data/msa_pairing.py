@@ -1,3 +1,36 @@
+"""
+MSA Pairing Module
+
+This module implements MSA (Multiple Sequence Alignment) pairing for multi-chain predictions
+in AlphaFold 3. MSA pairing is crucial for modeling protein complexes and interactions, as it
+identifies which sequences in different chain MSAs come from the same organism/species.
+
+The pairing process:
+1. Extracts species identifiers from MSA sequence headers
+2. Groups sequences by species across different chains
+3. Matches sequences from the same species based on sequence similarity
+4. Creates paired MSA features that preserve inter-chain coevolutionary information
+
+Key concepts:
+- Paired MSA: Sequences from different chains that originate from the same species,
+  providing information about co-evolution and interactions
+- Unpaired MSA: Chain-specific sequences that provide evolutionary information
+  for individual chains
+- Species-based pairing: Uses organism identifiers to match sequences across chains
+
+Main functions:
+- pair_sequences: Main pairing function that matches sequences across chains
+- create_paired_features: Creates paired MSA feature tensors
+- merge_chain_features: Merges features from multiple chains
+- merge_homomers_dense_msa: Handles identical chains (homomers)
+
+The implementation follows AlphaFold 3 Supplement Section 2.3, which describes
+how paired and unpaired MSAs are concatenated for multi-chain predictions.
+
+Reference:
+- Based on OpenFold's implementation of AlphaFold's MSA pairing
+"""
+
 import collections
 import copy
 

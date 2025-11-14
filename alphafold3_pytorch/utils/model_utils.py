@@ -1,3 +1,21 @@
+"""Model utility functions and classes for AlphaFold3 PyTorch implementation.
+
+This module provides core utilities for building and training neural network models,
+particularly for the AlphaFold3 architecture. It includes:
+
+- Tensor manipulation: padding, slicing, windowing, and reshaping operations
+- Learning rate scheduling: default warmup and decay schedules
+- Distance and geometry utilities: distance-to-bin conversion, coordinate transformations
+- Masking and pooling: lens-to-mask conversion, mean pooling with variable lengths
+- Batch operations: repeat-interleave for sequences with variable atom counts
+- Frame and coordinate transformations: expressing coordinates in frames, rigid transformations
+- Checkpointing utilities: for memory-efficient training
+- Pairwise operations: converting single masks to pairwise masks
+
+These utilities handle the complex tensor operations needed for protein structure prediction,
+including managing variable-length sequences, atomic coordinates, and geometric transformations.
+"""
+
 from functools import wraps
 from beartype.typing import Callable, List, Tuple, Union
 
@@ -11,27 +29,49 @@ from torch.nn import Module
 from alphafold3_pytorch.tensor_typing import Bool, Float, Int, Shaped, typecheck
 from alphafold3_pytorch.utils.utils import default, exists
 
-# constants
+# Type alias for shape specifications
 
 Shape = Union[Tuple[int, ...], List[int]]
 
-# helper functions
+# Helper functions for learning rate scheduling and tensor operations
 
 
-# default scheduler used in paper w/ warmup
+# Default learning rate scheduler used in AlphaFold3 paper with warmup and decay
 
 
 def default_lambda_lr_fn(steps: int) -> float:
-    """Default lambda learning rate function.
+    """Default learning rate schedule with linear warmup and exponential decay.
 
-    :param steps: The number of steps taken.
-    :return: The learning rate.
+    Implements the learning rate schedule from the AlphaFold3 paper:
+    - Linear warmup from 0 to 1.0 over the first 1000 steps
+    - Exponential decay with factor 0.95 every 50,000 steps after warmup
+
+    This schedule helps stabilize training in the early stages (warmup) and
+    gradually reduces the learning rate for fine-tuning (decay).
+
+    Args:
+        steps: The current training step number (0-indexed).
+
+    Returns:
+        float: The learning rate multiplier (scale factor for base learning rate).
+            During warmup (steps < 1000): returns steps/1000 (linear increase from 0 to 1).
+            After warmup: returns 0.95^((steps-1000)/50000) (exponential decay).
+
+    Example:
+        >>> default_lambda_lr_fn(0)    # Start of training
+        0.0
+        >>> default_lambda_lr_fn(500)  # Mid-warmup
+        0.5
+        >>> default_lambda_lr_fn(1000) # End of warmup
+        1.0
+        >>> default_lambda_lr_fn(51000) # After 50k decay steps
+        0.95
     """
-    # 1000 step warmup
+    # Linear warmup over first 1000 steps
     if steps < 1000:
         return steps / 1000
 
-    # decay 0.95 every 5e4 steps
+    # Exponential decay: multiply by 0.95 every 50,000 steps
     steps -= 1000
     return 0.95 ** (steps / 5e4)
 
@@ -42,26 +82,56 @@ def distance_to_dgram(
     bins: Float[" bins"],  # type: ignore
     return_labels: bool = False,
 ) -> Int["... dist"] | Int["... dist bins"]:  # type: ignore
-    """Converting from distance to discrete bins, e.g., for distance_labels and pae_labels using
-    the same logic as OpenFold.
+    """Convert continuous distances to discrete bins (distogram).
 
-    :param distance: The distance tensor.
-    :param bins: The bins tensor.
-    :param return_labels: Whether to return the labels.
-    :return: The one-hot bins tensor or the bin labels.
+    Converts continuous distance values into discrete bins for distogram prediction,
+    a key component in structure prediction. Uses the same binning logic as OpenFold
+    for compatibility. Each distance is assigned to the bin where it falls between
+    the lower and upper bounds.
+
+    The function handles:
+    - Absolute value of distances (ensures non-negative)
+    - Bin assignment using lower and upper bounds
+    - Optional one-hot encoding or label format
+
+    Args:
+        distance: Tensor of continuous distance values, shape (...,).
+        bins: 1D tensor of bin edges/boundaries, shape (num_bins,).
+            Bins are defined as intervals [bins[i], bins[i+1]).
+        return_labels: If True, return bin indices as labels (shape ...).
+            If False, return one-hot encoding (shape ..., num_bins).
+            Defaults to False.
+
+    Returns:
+        Int tensor: Either one-hot encoded bins (shape ..., num_bins) or
+            bin labels/indices (shape ...) depending on return_labels parameter.
+
+    Example:
+        >>> distances = torch.tensor([1.5, 3.2, 5.8])
+        >>> bins = torch.tensor([0.0, 2.0, 4.0, 6.0])
+        >>> distance_to_dgram(distances, bins, return_labels=True)
+        tensor([0, 1, 2])  # Bin indices
+        >>> distance_to_dgram(distances, bins, return_labels=False)
+        tensor([[1, 0, 0, 0],
+                [0, 1, 0, 0],
+                [0, 0, 1, 0]])  # One-hot encoding
     """
-
+    # Take absolute value to ensure non-negative distances
     distance = distance.abs()
 
-    bins = F.pad(bins, (0, 1), value = float('inf'))
+    # Add infinity as the final upper bound to catch all distances
+    bins = F.pad(bins, (0, 1), value=float('inf'))
     low, high = bins[:-1], bins[1:]
 
+    # Determine which bin each distance falls into
+    # A distance belongs to bin i if: low[i] <= distance < high[i]
     one_hot = (
         einx.greater_equal("..., bin_low -> ... bin_low", distance, low)
         & einx.less("..., bin_high -> ... bin_high", distance, high)
     ).long()
 
     if return_labels:
+        # Return bin indices instead of one-hot encoding
         return one_hot.argmax(dim=-1)
 
     return one_hot
@@ -69,76 +139,177 @@ def distance_to_dgram(
 
 @typecheck
 def offset_only_positive(t: Tensor, offset: Tensor) -> Tensor:
-    """Offset a Tensor only if it is positive."""
+    """Add an offset to a tensor only for positive values, leaving negative/zero values unchanged.
+
+    This is useful for adjusting indices or values where negative values have special
+    meaning (e.g., padding markers) that should be preserved.
+
+    Args:
+        t: Input tensor with values to potentially offset.
+        offset: Offset tensor to add to positive values.
+
+    Returns:
+        Tensor: Original tensor with offset added only to positive values.
+
+    Example:
+        >>> t = torch.tensor([-1, 0, 1, 2])
+        >>> offset = torch.tensor(10)
+        >>> offset_only_positive(t, offset)
+        tensor([-1, 0, 11, 12])
+    """
     is_positive = t >= 0
     t_offsetted = t + offset
     return torch.where(is_positive, t_offsetted, t)
 
 
 def l2norm(t: Tensor, eps: float = 1e-20, dim: int = -1) -> Tensor:
-    """Perform an L2 normalization on a Tensor.
+    """Perform L2 normalization on a tensor.
 
-    :param t: The Tensor.
-    :param eps: The epsilon value.
-    :param dim: The dimension to normalize over.
-    :return: The L2 normalized Tensor.
+    Normalizes the tensor such that the L2 norm (Euclidean length) along the
+    specified dimension equals 1. Adds a small epsilon for numerical stability
+    to avoid division by zero.
+
+    Args:
+        t: Input tensor to normalize.
+        eps: Small epsilon value to prevent division by zero. Defaults to 1e-20.
+        dim: Dimension along which to normalize. Defaults to -1 (last dimension).
+
+    Returns:
+        Tensor: L2-normalized tensor with same shape as input.
+
+    Example:
+        >>> t = torch.tensor([[3.0, 4.0], [1.0, 0.0]])
+        >>> l2norm(t, dim=-1)
+        tensor([[0.6, 0.8], [1.0, 0.0]])
     """
     return F.normalize(t, p=2, eps=eps, dim=dim)
 
 
 def max_neg_value(t: Tensor) -> Tensor:
-    """Get the maximum negative value of Tensor based on its `dtype`.
+    """Get the maximum negative value for a tensor's dtype.
 
-    :param t: The Tensor.
-    :return: The maximum negative value of its `dtype`.
+    Returns the most negative finite value representable by the tensor's data type.
+    Useful for masking operations where you want to set values to negative infinity
+    without actually using inf (which can cause numerical issues).
+
+    Args:
+        t: Tensor whose dtype determines the return value.
+
+    Returns:
+        Tensor: Scalar tensor containing the maximum negative value for the dtype.
+
+    Example:
+        >>> t = torch.tensor([1.0, 2.0], dtype=torch.float32)
+        >>> max_neg_value(t)
+        tensor(-3.4028e+38)
     """
     return -torch.finfo(t.dtype).max
 
 
 def log(t: Tensor, eps=1e-20) -> Tensor:
-    """Run a safe log function that clamps the input to be above `eps` to avoid `log(0)`.
+    """Compute natural logarithm with numerical stability.
 
-    :param t: The input tensor.
-    :param eps: The epsilon value.
-    :return: Tensor in the log domain.
+    Performs log(t) but clamps the input to be at least `eps` to avoid
+    log(0) which would result in negative infinity. This is essential for
+    numerical stability in loss functions and probability calculations.
+
+    Args:
+        t: Input tensor (should contain positive values).
+        eps: Minimum value to clamp to before taking log. Defaults to 1e-20.
+
+    Returns:
+        Tensor: Natural logarithm of the clamped input.
+
+    Example:
+        >>> t = torch.tensor([0.0, 1.0, 2.718])
+        >>> log(t)
+        tensor([-46.05, 0.00, 1.00])  # log(eps), log(1), log(e)
     """
     return torch.log(t.clamp(min=eps))
 
 
 def divisible_by(num: int, den: int) -> bool:
-    """Check if a number is divisible by another number.
+    """Check if a number is evenly divisible by another number.
 
-    :param num: The numerator.
-    :param den: The denominator.
-    :return: True if `num` is divisible by `den`, False otherwise.
+    Args:
+        num: The numerator (dividend).
+        den: The denominator (divisor).
+
+    Returns:
+        bool: True if num is evenly divisible by den (remainder is 0), False otherwise.
+
+    Example:
+        >>> divisible_by(10, 5)
+        True
+        >>> divisible_by(10, 3)
+        False
     """
     return (num % den) == 0
 
 
 def compact(*args):
-    """Compact a tuple of objects by removing any `None` values.
+    """Remove None values from a collection of arguments.
 
-    :param args: The objects to compact.
-    :return: The compacted objects.
+    Filters out any None values from the input arguments, returning only
+    the values that exist. Useful for cleaning up optional parameters or
+    removing invalid entries.
+
+    Args:
+        *args: Variable number of arguments to filter.
+
+    Returns:
+        tuple: Tuple containing only non-None arguments.
+
+    Example:
+        >>> compact(1, None, 2, None, 3)
+        (1, 2, 3)
+        >>> compact(None, None)
+        ()
     """
     return tuple(filter(exists, args))
 
 
 def pack_one(t: Tensor, pattern: str) -> Tuple[Tensor, List[Shape]]:
-    """Pack a single tensor into a tuple of tensors with the given pattern.
+    """Pack a single tensor and return an unpacking function.
 
-    :param t: The tensor to pack.
-    :param pattern: The pattern with which to pack.
-    :return: The packed tensor along with the shape(s) of the tensor.
+    A convenience wrapper around einops.pack() for single tensors. This function
+    packs a tensor according to a pattern and returns both the packed tensor and
+    a closure function that can unpack it back to the original shape.
+
+    This is particularly useful when you need to flatten dimensions for processing
+    and then restore the original shape afterwards.
+
+    Args:
+        t: The tensor to pack.
+        pattern: The einops pattern specifying how to pack the tensor.
+            Example: "b n *" packs all dimensions after the first two into a single dimension.
+
+    Returns:
+        tuple: A tuple containing:
+            - packed (Tensor): The packed tensor
+            - unpack_one (Callable): A closure function that can unpack tensors back to the original shape
+
+    Example:
+        >>> t = torch.randn(2, 3, 4, 5)  # Shape: (2, 3, 4, 5)
+        >>> packed, unpack_fn = pack_one(t, "b n *")
+        >>> packed.shape
+        torch.Size([2, 3, 20])  # 4*5=20 dimensions packed
+        >>> unpacked = unpack_fn(packed)
+        >>> unpacked.shape
+        torch.Size([2, 3, 4, 5])  # Original shape restored
     """
+    # Pack the single tensor using einops.pack
     packed, ps = pack([t], pattern)
 
     def unpack_one(to_unpack, unpack_pattern=None):
-        """Unpack a single tensor.
+        """Unpack a tensor back to its original shape.
 
-        :param to_unpack: The tensor to unpack.
-        :param pattern: The pattern with which to unpack.
-        :return: The unpacked tensor.
+        Args:
+            to_unpack: The tensor to unpack.
+            unpack_pattern: Optional pattern for unpacking. If None, uses the original pack pattern.
+
+        Returns:
+            Tensor: The unpacked tensor restored to original shape.
         """
         (unpacked,) = unpack(to_unpack, ps, default(unpack_pattern, pattern))
         return unpacked
@@ -147,44 +318,102 @@ def pack_one(t: Tensor, pattern: str) -> Tuple[Tensor, List[Shape]]:
 
 
 def softclamp(t: Tensor, value: float) -> Tensor:
-    """Perform a soft clamp on a Tensor.
+    """Perform a differentiable soft clamping operation using tanh.
 
-    :param t: The Tensor.
-    :param value: The value to clamp to.
-    :return: The soft clamped Tensor
+    Unlike hard clamping (torch.clamp), this uses a smooth tanh-based clamping
+    that maintains gradients. The output is bounded in the range (-value, value)
+    but the function is fully differentiable everywhere.
+
+    Args:
+        t: Input tensor to clamp.
+        value: The clamping bound (output will be in range (-value, value)).
+
+    Returns:
+        Tensor: Soft-clamped tensor with same shape as input.
+
+    Example:
+        >>> t = torch.tensor([-10.0, 0.0, 10.0])
+        >>> softclamp(t, value=5.0)
+        tensor([-5.0, 0.0, 5.0])  # Approximately, due to tanh saturation
     """
     return (t / value).tanh() * value
 
 
 def exclusive_cumsum(t: Tensor, dim: int = -1) -> Tensor:
-    """Perform an exclusive cumulative summation on a Tensor.
+    """Compute exclusive cumulative sum (cumsum shifted by one position).
 
-    :param t: The Tensor.
-    :param dim: The dimension to sum over.
-    :return: The exclusive cumulative sum Tensor.
+    Unlike standard cumsum where the first element is included, exclusive cumsum
+    shifts the result so the first element is 0 and the last cumsum element is excluded.
+    This is useful for computing offsets and indices.
+
+    Args:
+        t: Input tensor.
+        dim: Dimension along which to compute cumsum. Defaults to -1.
+
+    Returns:
+        Tensor: Exclusive cumulative sum with same shape as input.
+
+    Example:
+        >>> t = torch.tensor([1, 2, 3, 4])
+        >>> exclusive_cumsum(t)
+        tensor([0, 1, 3, 6])  # Regular cumsum would be [1, 3, 6, 10]
     """
     return t.cumsum(dim=dim) - t
 
 
 @typecheck
 def symmetrize(t: Float["b n n ..."]) -> Float["b n n ..."]:  # type: ignore
-    """Symmetrize a Tensor.
+    """Make a tensor symmetric by adding it with its transpose.
 
-    :param t: The Tensor.
-    :return: The symmetrized Tensor.
+    Takes a pairwise tensor (with dimensions i and j) and makes it symmetric
+    by adding it to its transpose. Useful for ensuring pairwise features or
+    distance matrices are symmetric.
+
+    Args:
+        t: Input tensor with shape (b, n, n, ...) where n is the size of the
+            dimensions to symmetrize.
+
+    Returns:
+        Tensor: Symmetrized tensor where output[b,i,j,...] = input[b,i,j,...] + input[b,j,i,...]
+
+    Example:
+        >>> t = torch.tensor([[[1, 2], [3, 4]]])  # Shape: (1, 2, 2)
+        >>> symmetrize(t)
+        tensor([[[2, 5],
+                 [5, 8]]])  # [1+1, 2+3], [3+2, 4+4]
     """
     return t + rearrange(t, "b i j ... -> b j i ...")
 
 
-# decorators
+# Decorators for optional operations
 
 
 def maybe(fn):
-    """Decorator to check if a Tensor exists before running a function on it."""
+    """Decorator to safely apply a function only if the input exists (is not None).
+
+    Wraps a function to check if its first argument exists before calling it.
+    If the argument is None, returns None instead of calling the function.
+    This prevents errors when optional tensors might be None.
+
+    Args:
+        fn: Function to wrap.
+
+    Returns:
+        Callable: Wrapped function that returns None if first arg is None.
+
+    Example:
+        >>> @maybe
+        ... def double(x):
+        ...     return x * 2
+        >>> double(5)
+        10
+        >>> double(None)
+        None
+    """
 
     @wraps(fn)
     def inner(t, *args, **kwargs):
-        """Inner function to check if a Tensor exists before running a function on it."""
+        """Inner wrapper function that checks for existence."""
         if not exists(t):
             return None
         return fn(t, *args, **kwargs)
@@ -784,9 +1013,27 @@ def get_frames_from_atom_pos(
 
 
 class ExpressCoordinatesInFrame(Module):
-    """Algorithm 29."""
+    """Transform coordinates into a local reference frame (Algorithm 29 from AlphaFold).
+
+    This module implements Algorithm 29 from AlphaFold, which expresses 3D coordinates
+    in a local reference frame defined by three points. The frame is constructed by
+    building an orthonormal basis from the three reference points, then projecting
+    the input coordinates onto this basis.
+
+    This is useful for representing atomic coordinates in a residue-local frame,
+    making them invariant to global rotation and translation of the structure.
+
+    Attributes:
+        eps: Small epsilon value for numerical stability in normalization.
+    """
 
     def __init__(self, eps=1e-8):
+        """Initialize the ExpressCoordinatesInFrame module.
+
+        Args:
+            eps: Epsilon value for numerical stability in L2 normalization.
+                Defaults to 1e-8.
+        """
         super().__init__()
         self.eps = eps
 
@@ -796,36 +1043,58 @@ class ExpressCoordinatesInFrame(Module):
         coords: Float["b m 3"],  # type: ignore
         frame: Float["b m 3 3"] | Float["b 3 3"] | Float["3 3"],  # type: ignore
     ) -> Float["b m 3"]:  # type: ignore
-        """Express coordinates in the given frame.
+        """Transform coordinates into the local reference frame.
 
-        :param coords: Coordinates to be expressed in the given frame.
-        :param frame: Frames defined by three points.
-        :return: The transformed coordinates.
+        The frame is defined by three points (a, b, c) where:
+        - b is the origin of the frame
+        - The basis is constructed from normalized vectors between the points
+        - Coordinates are projected onto this orthonormal basis
+
+        Args:
+            coords: 3D coordinates to transform, shape (batch, num_points, 3).
+            frame: Reference frame defined by 3 points, shape (batch, num_frames, 3, 3)
+                or (batch, 3, 3) or (3, 3). The last two dimensions are [3 points, 3 coords].
+                Broadcasting is supported for batch and num_frames dimensions.
+
+        Returns:
+            Tensor: Transformed coordinates in the local frame, shape (batch, num_points, 3).
+
+        Example:
+            >>> module = ExpressCoordinatesInFrame()
+            >>> coords = torch.randn(2, 10, 3)  # 2 batches, 10 atoms
+            >>> frame = torch.randn(2, 10, 3, 3)  # Frame for each atom
+            >>> local_coords = module(coords, frame)
+            >>> local_coords.shape
+            torch.Size([2, 10, 3])
         """
-
+        # Handle different input dimensions for frame - broadcast to (b, m, 3, 3)
         if frame.ndim == 2:
             frame = rearrange(frame, "fr fc -> 1 1 fr fc")
         elif frame.ndim == 3:
             frame = rearrange(frame, "b fr fc -> b 1 fr fc")
 
-        # Extract frame atoms
+        # Extract the three reference points defining the frame
         a, b, c = frame.unbind(dim=-1)
+
+        # Compute normalized vectors from b to a and b to c
         w1 = l2norm(a - b, eps=self.eps)
         w2 = l2norm(c - b, eps=self.eps)
 
-        # Build orthonormal basis
+        # Build orthonormal basis vectors
+        # e1 and e2 span the plane, e3 is perpendicular
         e1 = l2norm(w1 + w2, eps=self.eps)
         e2 = l2norm(w2 - w1, eps=self.eps)
-        e3 = torch.cross(e1, e2, dim=-1)
+        e3 = torch.cross(e1, e2, dim=-1)  # Perpendicular to the plane
 
-        # Project onto frame basis
+        # Transform coords by translating to origin b and projecting onto basis
         d = coords - b
 
+        # Project displacement vectors onto each basis vector
         transformed_coords = torch.stack(
             (
-                einsum(d, e1, "... i, ... i -> ..."),
-                einsum(d, e2, "... i, ... i -> ..."),
-                einsum(d, e3, "... i, ... i -> ..."),
+                einsum(d, e1, "... i, ... i -> ..."),  # x component
+                einsum(d, e2, "... i, ... i -> ..."),  # y component
+                einsum(d, e3, "... i, ... i -> ..."),  # z component
             ),
             dim=-1,
         )
@@ -834,9 +1103,18 @@ class ExpressCoordinatesInFrame(Module):
 
 
 class RigidFrom3Points(Module):
-    """An implementation of Algorithm 21 in Section 1.8.1 in AlphaFold 2 paper:
+    """Compute rigid transformation (rotation + translation) from three points.
 
+    Implements Algorithm 21 from Section 1.8.1 of the AlphaFold 2 paper:
     https://www.nature.com/articles/s41586-021-03819-2
+
+    Given three points in 3D space, this computes a rotation matrix R and translation
+    vector t that define a rigid transformation. The transformation is constructed
+    such that point x2 becomes the origin, and an orthonormal basis is built from
+    the vectors between the points.
+
+    This is used to define local coordinate frames from backbone atoms in protein
+    structures (typically N, CA, C atoms).
     """
 
     @typecheck
@@ -844,30 +1122,66 @@ class RigidFrom3Points(Module):
         self,
         three_points: Tuple[Float["... 3"], Float["... 3"], Float["... 3"]] | Float["3 ... 3"],  # type: ignore
     ) -> Tuple[Float["... 3 3"], Float["... 3"]]:  # type: ignore
-        """Compute a rigid transformation from three points."""
+        """Compute rotation matrix and translation vector from three reference points.
+
+        The algorithm:
+        1. Uses x2 as the origin (translation t = x2)
+        2. Builds an orthonormal basis from vectors v1 = x3-x2 and v2 = x1-x2
+        3. Applies Gram-Schmidt orthogonalization to get e1, e2
+        4. Computes e3 as the cross product for a right-handed system
+        5. Constructs rotation matrix R from the basis vectors
+
+        Args:
+            three_points: Either a tuple of 3 tensors or a stacked tensor.
+                - As tuple: (x1, x2, x3) where each has shape (..., 3)
+                - As tensor: shape (3, ..., 3) stacking the three points
+                x1, x2, x3 are the three reference points in 3D space.
+
+        Returns:
+            tuple: A tuple containing:
+                - R (Tensor): Rotation matrix, shape (..., 3, 3)
+                - t (Tensor): Translation vector, shape (..., 3)
+
+        Example:
+            >>> module = RigidFrom3Points()
+            >>> # Three points defining a local frame
+            >>> x1 = torch.tensor([[1.0, 0.0, 0.0]])
+            >>> x2 = torch.tensor([[0.0, 0.0, 0.0]])
+            >>> x3 = torch.tensor([[0.0, 1.0, 0.0]])
+            >>> R, t = module((x1, x2, x3))
+            >>> R.shape, t.shape
+            (torch.Size([1, 3, 3]), torch.Size([1, 3]))
+        """
+        # Convert tuple to stacked tensor if needed
         if isinstance(three_points, tuple):
             three_points = torch.stack(three_points)
 
-        # allow for any number of leading dimensions
-
+        # Pack to handle arbitrary leading dimensions
         (x1, x2, x3), unpack_one = pack_one(three_points, "three * d")
 
-        # main algorithm
+        # Main algorithm: build orthonormal basis using Gram-Schmidt
 
+        # Compute vectors from x2 to x3 and x2 to x1
         v1 = x3 - x2
         v2 = x1 - x2
 
+        # First basis vector: normalize v1
         e1 = l2norm(v1)
+
+        # Second basis vector: orthogonalize v2 w.r.t. e1 using Gram-Schmidt
         u2 = v2 - e1 @ (e1.t() @ v2)
         e2 = l2norm(u2)
 
+        # Third basis vector: perpendicular to e1 and e2
         e3 = torch.cross(e1, e2, dim=-1)
 
+        # Build rotation matrix from basis vectors (as columns)
         R = torch.stack((e1, e2, e3), dim=-1)
+
+        # Translation is just x2 (the origin point)
         t = x2
 
-        # unpack
-
+        # Unpack to restore original dimensions
         R = unpack_one(R, "* r1 r2")
         t = unpack_one(t, "* c")
 
@@ -875,12 +1189,20 @@ class RigidFrom3Points(Module):
 
 
 class RigidFromReference3Points(Module):
-    """A modification of Algorithm 21 in Section 1.8.1 in AlphaFold 2 paper:
+    """Compute rigid transformation to align reference coordinates with target coordinates.
 
+    A modification of Algorithm 21 from Section 1.8.1 of the AlphaFold 2 paper:
     https://www.nature.com/articles/s41586-021-03819-2
 
-    Inpsired by the implementation in the OpenFold codebase:
+    Inspired by the OpenFold implementation:
     https://github.com/aqlaboratory/openfold/blob/6f63267114435f94ac0604b6d89e82ef45d94484/openfold/utils/feats.py#L143
+
+    This computes the rotation R and translation t that align reference backbone atoms
+    with actual atom positions. Unlike RigidFrom3Points which directly builds a frame,
+    this computes the transformation needed to place atoms at their reference positions.
+
+    The algorithm uses a series of rotations to align x3 with the x-axis and x1 with
+    the xy-plane, building up the full rotation matrix incrementally.
     """
 
     @typecheck
@@ -889,39 +1211,61 @@ class RigidFromReference3Points(Module):
         three_points: Tuple[Float["... 3"], Float["... 3"], Float["... 3"]] | Float["3 ... 3"],  # type: ignore
         eps: float = 1e-20,
     ) -> Tuple[Float["... 3 3"], Float["... 3"]]:  # type: ignore
-        """Return a transformation object from reference coordinates.
+        """Compute transformation from reference coordinates to align three points.
 
-        NOTE: This method does not take care of symmetries. If you
-        provide the atom positions in the non-standard way,
-        e.g., the N atom of amino acid residues will end up
-        not at [-0.527250, 1.359329, 0.0] but instead at
-        [-0.527250, -1.359329, 0.0]. You need to take care
-        of such cases in your code.
+        This method computes a rotation and translation that, when applied to standard
+        reference positions, will align them with the input three points. The transformation
+        is built through a series of rotations that progressively align the reference frame.
 
-        :param three_points: Three reference points to define the transformation.
-        :param eps: A small value to avoid division by zero.
-        :return: A transformation object. After applying the translation and
-            rotation to the reference backbone, the coordinates will
-            approximately equal to the input coordinates.
+        Args:
+            three_points: Either a tuple of 3 tensors or a stacked tensor defining the frame.
+                - As tuple: (x1, x2, x3) where each has shape (..., 3)
+                - As tensor: shape (3, ..., 3)
+                Typically these are N, CA, C backbone atoms for proteins.
+            eps: Small epsilon value for numerical stability to avoid division by zero.
+                Defaults to 1e-20.
+
+        Returns:
+            tuple: A tuple containing:
+                - R (Tensor): Rotation matrix, shape (..., 3, 3). When applied to reference
+                    backbone coordinates, aligns them with the input points.
+                - t (Tensor): Translation vector, shape (..., 3).
+
+        Note:
+            This method does not handle symmetries. If atoms are provided in non-standard
+            order, the resulting reference positions may be mirrored. For example, the N
+            atom might end up at [-0.527250, -1.359329, 0.0] instead of the standard
+            [-0.527250, 1.359329, 0.0]. Handle symmetries in calling code if needed.
+
+        Example:
+            >>> module = RigidFromReference3Points()
+            >>> # Backbone atoms (N, CA, C)
+            >>> n_pos = torch.tensor([[1.0, 2.0, 3.0]])
+            >>> ca_pos = torch.tensor([[2.0, 3.0, 4.0]])
+            >>> c_pos = torch.tensor([[3.0, 4.0, 5.0]])
+            >>> R, t = module((n_pos, ca_pos, c_pos))
         """
+        # Convert tuple to stacked tensor if needed
         if isinstance(three_points, tuple):
             three_points = torch.stack(three_points)
 
-        # allow for any number of leading dimensions
-
+        # Pack to handle arbitrary leading dimensions
         (x1, x2, x3), unpack_one = pack_one(three_points, "three * d")
 
-        # main algorithm
+        # Main algorithm: build rotation through successive rotations
 
+        # Step 1: Translate so x2 is at origin
         t = -1 * x2
         x1 = x1 + t
         x3 = x3 + t
 
+        # Step 2: Rotate around z-axis to align x3's xy-projection with x-axis
         x3_x, x3_y, x3_z = [x3[..., i] for i in range(3)]
         norm = torch.sqrt(eps + x3_x**2 + x3_y**2)
         sin_x3_1 = -x3_y / norm
         cos_x3_1 = x3_x / norm
 
+        # Build rotation matrix for z-axis rotation
         x3_1_R = sin_x3_1.new_zeros((*sin_x3_1.shape, 3, 3))
         x3_1_R[..., 0, 0] = cos_x3_1
         x3_1_R[..., 0, 1] = -1 * sin_x3_1
@@ -929,10 +1273,12 @@ class RigidFromReference3Points(Module):
         x3_1_R[..., 1, 1] = cos_x3_1
         x3_1_R[..., 2, 2] = 1
 
+        # Step 3: Rotate around y-axis to align x3 with x-axis
         norm = torch.sqrt(eps + x3_x**2 + x3_y**2 + x3_z**2)
         sin_x3_2 = x3_z / norm
         cos_x3_2 = torch.sqrt(x3_x**2 + x3_y**2) / norm
 
+        # Build rotation matrix for y-axis rotation
         x3_2_R = sin_x3_2.new_zeros((*sin_x3_2.shape, 3, 3))
         x3_2_R[..., 0, 0] = cos_x3_2
         x3_2_R[..., 0, 2] = sin_x3_2
@@ -940,14 +1286,17 @@ class RigidFromReference3Points(Module):
         x3_2_R[..., 2, 0] = -1 * sin_x3_2
         x3_2_R[..., 2, 2] = cos_x3_2
 
+        # Combine rotations and apply to x1
         x3_R = einsum(x3_2_R, x3_1_R, "n i j, n j k -> n i k")
         x1 = einsum(x3_R, x1, "n i j, n j -> n i")
 
+        # Step 4: Rotate around x-axis to align x1 with xy-plane
         _, x1_y, x1_z = [x1[..., i] for i in range(3)]
         norm = torch.sqrt(eps + x1_y**2 + x1_z**2)
         sin_x1 = -x1_z / norm
         cos_x1 = x1_y / norm
 
+        # Build rotation matrix for x-axis rotation
         x1_R = sin_x3_2.new_zeros((*sin_x3_2.shape, 3, 3))
         x1_R[..., 0, 0] = 1
         x1_R[..., 1, 1] = cos_x1
@@ -955,13 +1304,14 @@ class RigidFromReference3Points(Module):
         x1_R[..., 2, 1] = sin_x1
         x1_R[..., 2, 2] = cos_x1
 
+        # Combine all rotations
         R = einsum(x1_R, x3_R, "n i j, n j k -> n i k")
 
+        # Transpose to get the inverse transformation (from reference to actual)
         R = R.transpose(-1, -2)
         t = -1 * t
 
-        # unpack
-
+        # Unpack to restore original dimensions
         R = unpack_one(R, "* r1 r2")
         t = unpack_one(t, "* c")
 

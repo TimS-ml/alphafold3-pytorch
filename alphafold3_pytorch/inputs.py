@@ -1,3 +1,64 @@
+"""
+Input Processing Module for AlphaFold3.
+
+This module handles the transformation and preprocessing of molecular structure data
+for AlphaFold3. It provides a comprehensive pipeline for converting various input
+formats (PDB files, mmCIF files, SMILES strings, etc.) into the atom-level
+representations required by the AlphaFold3 model.
+
+Key Components:
+--------------
+1. **Input Data Classes**:
+   - AtomInput: Atom-level input for a single structure
+   - BatchedAtomInput: Batched atom-level inputs for training
+   - MoleculeInput: Molecule-level input representation
+   - Alphafold3Input: High-level input with chains and optional features
+   - PDBInput: Input from PDB/mmCIF files
+
+2. **Transformation Pipeline**:
+   The module implements a hierarchical transformation:
+   PDBInput -> Alphafold3Input -> MoleculeInput -> AtomInput
+
+   Each level adds more detail and converts to a format closer to what the
+   model needs.
+
+3. **Key Features**:
+   - Automatic MSA (Multiple Sequence Alignment) fetching and parsing
+   - Template structure searching and integration
+   - Ligand SMILES processing with RDKit
+   - Atom and bond feature extraction
+   - Missing atom handling and masking
+   - Cropping and windowing for memory efficiency
+   - Batching with proper padding
+
+4. **Main Functions**:
+   - pdb_input_to_molecule_input(): Convert PDB files to molecule representation
+   - molecule_to_atom_input(): Convert molecules to atom representation
+   - collate_inputs_to_batched_atom_input(): Batch multiple inputs together
+
+5. **Dataset Classes**:
+   - PDBDataset: Load structures from PDB/mmCIF files
+   - AtomDataset: Load pre-processed atom inputs from disk
+
+The module handles complex molecular structures including:
+- Proteins (standard and modified amino acids)
+- DNA and RNA (with various modifications)
+- Small molecule ligands
+- Metal ions and cofactors
+- Multi-chain complexes
+- Missing or disordered regions
+
+Example:
+    >>> from alphafold3_pytorch.inputs import PDBDataset, pdb_input_to_molecule_input
+    >>> # Load a PDB file
+    >>> dataset = PDBDataset(folder='./pdbs')
+    >>> pdb_input = dataset[0]
+    >>> # Transform to molecule input
+    >>> mol_input = pdb_input_to_molecule_input(pdb_input)
+    >>> # Further transform to atom input
+    >>> atom_input = molecule_to_atom_input(mol_input)
+"""
+
 from __future__ import annotations
 
 import copy
@@ -128,25 +189,33 @@ from alphafold3_pytorch.attention import (
     pad_or_slice_to
 )
 
-# silence RDKit's warnings
-
+# Silence RDKit's warnings to avoid cluttering output
 RDLogger.DisableLog("rdApp.*")
 
-# constants
+# Constants
 
+# Timeout for PDB to molecule input conversion (in seconds)
+# Prevents hanging on problematic structures
 PDB_INPUT_TO_MOLECULE_INPUT_MAX_SECONDS_PER_INPUT = 60
 
-IS_MOLECULE_TYPES = 5
-IS_PROTEIN_INDEX = 0
-IS_RNA_INDEX = 1
-IS_DNA_INDEX = 2
-IS_LIGAND_INDEX = -2
-IS_METAL_ION_INDEX = -1
+# Molecule type classification constants
+# These define the different biomolecule types AlphaFold3 can handle
 
-IS_BIOMOLECULE_INDICES = slice(0, 3)
-IS_NON_PROTEIN_INDICES = slice(1, 5)
-IS_NON_NA_INDICES = [0, 3, 4]
+IS_MOLECULE_TYPES = 5  # Total number of molecule type categories
 
+# Indices for each molecule type (positive indices are direct, negative are from end)
+IS_PROTEIN_INDEX = 0  # Proteins and peptides
+IS_RNA_INDEX = 1  # RNA molecules
+IS_DNA_INDEX = 2  # DNA molecules
+IS_LIGAND_INDEX = -2  # Small molecule ligands (index 3)
+IS_METAL_ION_INDEX = -1  # Metal ions and ions (index 4)
+
+# Useful slices for molecule type masks
+IS_BIOMOLECULE_INDICES = slice(0, 3)  # Protein, RNA, DNA (chainable polymers)
+IS_NON_PROTEIN_INDICES = slice(1, 5)  # RNA, DNA, ligands, metal ions
+IS_NON_NA_INDICES = [0, 3, 4]  # Protein, ligands, metal ions (not nucleic acids)
+
+# Convert negative indices to positive for actual use
 IS_PROTEIN, IS_RNA, IS_DNA, IS_LIGAND, IS_METAL_ION = tuple(
     (IS_MOLECULE_TYPES + i if i < 0 else i)
     for i in [
@@ -351,27 +420,81 @@ def get_mol_has_bond(
 
 
 def flatten(arr):
-    """Flatten a list of lists."""
+    """
+    Flatten a nested list of lists into a single list.
+
+    Args:
+        arr: A list of lists (or any nested iterable).
+
+    Returns:
+        A flattened list containing all elements.
+
+    Example:
+        >>> flatten([[1, 2], [3, 4]])
+        [1, 2, 3, 4]
+    """
     return [el for sub_arr in arr for el in sub_arr]
 
 
 def without_keys(d: dict, exclude: set):
-    """Remove keys from a dictionary."""
+    """
+    Create a new dictionary excluding specified keys.
+
+    Args:
+        d: Source dictionary.
+        exclude: Set of keys to exclude.
+
+    Returns:
+        A new dictionary without the excluded keys.
+
+    Example:
+        >>> without_keys({'a': 1, 'b': 2, 'c': 3}, {'b'})
+        {'a': 1, 'c': 3}
+    """
     return {k: v for k, v in d.items() if k not in exclude}
 
 
 def pad_to_len(t, length, value=0, dim=-1):
-    """Pad a tensor to a certain length."""
-    assert dim < 0
+    """
+    Pad a tensor to a specified length along a dimension.
+
+    Args:
+        t: Input tensor to pad.
+        length: Target length for the specified dimension.
+        value: Value to use for padding (default: 0).
+        dim: Dimension to pad (must be negative, default: -1).
+
+    Returns:
+        Padded tensor with the specified dimension extended to `length`.
+
+    Note:
+        If the tensor is already longer than `length`, it is not truncated.
+    """
+    assert dim < 0, "dim must be negative"
     zeros = (0, 0) * (-dim - 1)
     return F.pad(t, (*zeros, 0, max(0, length - t.shape[dim])), value=value)
 
 
 def compose(*fns: Callable):
-    """Chain e.g., from Alphafold3Input -> MoleculeInput -> AtomInput."""
+    """
+    Compose multiple functions into a single function pipeline.
+
+    This is useful for creating transformation pipelines, e.g.:
+    PDBInput -> Alphafold3Input -> MoleculeInput -> AtomInput
+
+    Args:
+        *fns: Variable number of functions to compose.
+
+    Returns:
+        A composed function that applies all functions in sequence.
+
+    Example:
+        >>> f = compose(fn1, fn2, fn3)
+        >>> result = f(input)  # Equivalent to fn3(fn2(fn1(input)))
+    """
 
     def inner(x, *args, **kwargs):
-        """Compose the functions."""
+        """Apply each function in sequence."""
         for fn in fns:
             x = fn(x, *args, **kwargs)
         return x

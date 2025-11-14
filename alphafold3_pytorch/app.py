@@ -1,3 +1,35 @@
+"""
+Web Application Interface for AlphaFold3 Structure Prediction
+
+This module provides an interactive web-based user interface for AlphaFold3 using
+the Gradio framework. It allows users to:
+
+- Build molecular complexes through an intuitive GUI
+- Input proteins, RNA, DNA, ligands, and metal ions
+- Visualize predicted 3D structures interactively
+- Download predicted structures in PDB format
+
+The application features:
+    - Real-time input validation for sequence data
+    - Support for multiple molecule types and copies
+    - Interactive 3D structure visualization
+    - Session-based caching for predictions
+    - Automatic cleanup of temporary files
+
+Technical Details:
+    The web UI is built with Gradio and uses Molecule3D for structure visualization.
+    Structure predictions are cached per-session and automatically cleaned up after
+    timeout (10-60 minutes of inactivity).
+
+Usage:
+    $ python -m alphafold3_pytorch.app --checkpoint weights.ckpt --cache-dir ./cache
+
+Example:
+    # Start the web server
+    $ alphafold3-app --checkpoint model.ckpt
+    # Then navigate to the provided URL (usually http://localhost:7860)
+"""
+
 import click
 from pathlib import Path
 
@@ -7,20 +39,49 @@ from Bio.PDB import PDBIO
 
 from alphafold3_pytorch import Alphafold3, Alphafold3Input
 
-# constants
+# Global constants and state
+# These are module-level variables shared across requests
 
-model = None
-cache_path = None
-pdb_writer = PDBIO()
+model = None        # Loaded AlphaFold3 model (loaded once on startup)
+cache_path = None   # Directory for caching prediction outputs
+pdb_writer = PDBIO()  # BioPython writer for PDB format output
 
-# main fold function
+# Main structure prediction function
 
 def fold(entities, request):
+    """
+    Run AlphaFold3 structure prediction for the given molecular entities.
+
+    This function takes a list of molecular entities (proteins, nucleic acids, ligands, ions),
+    prepares them as input to the AlphaFold3 model, runs inference, and saves the predicted
+    structure to a PDB file.
+
+    Args:
+        entities: List of dictionaries, each containing:
+                  - mol_type: Type of molecule ('Protein', 'RNA', 'DNA', 'Ligand', 'Ion')
+                  - sequence: Sequence string or identifier
+                  - num_copies: Number of copies to include in the complex
+        request: Gradio request object containing session information
+
+    Returns:
+        str: Path to the saved PDB file containing the predicted structure
+
+    Example:
+        >>> entities = [
+        ...     {'mol_type': 'Protein', 'sequence': 'MKTAY...', 'num_copies': 1},
+        ...     {'mol_type': 'DNA', 'sequence': 'ATCG', 'num_copies': 2}
+        ... ]
+        >>> pdb_path = fold(entities, request)
+    """
+    # Initialize lists for each molecule type
     proteins = []
     rnas = []
     dnas = []
     ligands = []
     ions = []
+
+    # Organize entities by molecule type and duplicate based on num_copies
+    # This allows modeling multi-chain complexes and homomers
     for entity in entities:
         if entity["mol_type"] == "Protein":
             proteins.extend([entity["sequence"]] * entity["num_copies"])
@@ -33,34 +94,51 @@ def fold(entities, request):
         elif entity["mol_type"] == "Ion":
             ions.extend([entity["sequence"]] * entity["num_copies"])
 
-    # Prepare the input for the model
+    # Prepare the input data structure for AlphaFold3
+    # Alphafold3Input handles feature generation and format conversion
     alphafold3_input = Alphafold3Input(
         proteins=proteins,
-        ss_dna=dnas,
-        ss_rna=rnas,
+        ss_dna=dnas,     # Single-stranded DNA
+        ss_rna=rnas,     # Single-stranded RNA
         ligands=ligands,
         metal_ions=ions,
     )
 
-    # Run the model inference in a separate thread
+    # Run model inference to predict structure
+    # Set to eval mode to disable dropout and other training-specific behaviors
     model.eval()
     (structure,) = model.forward_with_alphafold3_inputs(
         alphafold3_inputs=alphafold3_input,
-        return_bio_pdb_structures=True,
+        return_bio_pdb_structures=True,  # Return BioPython Structure object
     )
 
+    # Generate unique output path for this prediction
+    # Uses session hash for isolation and random token for uniqueness
     global cache_path, pdb_writer
     output_path = cache_path / str(request.session_hash) / f"{secrets.token_urlsafe(8)}.pdb"
     output_path.parent.mkdir(exist_ok=True)
 
+    # Save predicted structure to PDB file
     pdb_writer.set_structure(structure)
     pdb_writer.save(str(output_path))
 
     return str(output_path)
 
-# gradio
+# Gradio-specific helper functions
 
 def delete_cache(request):
+    """
+    Clean up cached prediction files for a user session.
+
+    This function is called automatically when a user's session ends or times out.
+    It removes all prediction files associated with the session to free up disk space.
+
+    Args:
+        request: Gradio request object containing session_hash
+
+    Note:
+        This function is registered with Gradio's unload event and runs automatically.
+    """
     if not request.session_hash:
         return
 
@@ -70,9 +148,32 @@ def delete_cache(request):
 
 
 def start_gradio_app():
+    """
+    Initialize and launch the Gradio web application interface.
+
+    This function sets up the complete web UI including:
+    - Entity input controls (molecule type, sequence, copies)
+    - Validation for protein, DNA, and RNA sequences
+    - Support for ligands and metal ions from predefined lists
+    - Interactive 3D structure visualization
+    - Add/delete functionality for molecular entities
+    - Prediction button that triggers structure folding
+
+    The UI layout includes:
+    - Input section for adding molecular entities
+    - Entity list showing all added components
+    - Prediction button and 3D structure viewer
+    - Automatic session cleanup
+
+    Note:
+        Cache cleanup is configured with a timeout of 600-3600 seconds (10-60 minutes).
+        The app automatically cleans up old prediction files after this period.
+    """
     import gradio as gr
     from gradio_molecule3d import Molecule3D
 
+    # Configure Gradio app with automatic cache cleanup
+    # delete_cache=(min_seconds, max_seconds) sets cleanup interval
     with gr.Blocks(delete_cache=(600, 3600)) as gradio_app:
         entities = gr.State([])
 
@@ -246,12 +347,36 @@ def start_gradio_app():
         gradio_app.unload(delete_cache)
         gradio_app.launch()
 
-# cli
+# CLI entry point for launching the web app
 @click.command()
 @click.option("-ckpt", "--checkpoint", type=str, help="path to alphafold3 checkpoint", required=True)
 @click.option("-cache", "--cache-dir", type=str, help="path to output cache", required=False, default="cache")
 @click.option("-prec", "--precision", type=str, help="precision to use", required=False, default="float32")
 def app(checkpoint: str, cache_dir: str, precision: str):
+    """
+    Launch the AlphaFold3 web application.
+
+    This command starts a Gradio web server that provides an interactive interface
+    for structure prediction. The server loads the model once at startup and serves
+    predictions to multiple users.
+
+    Args:
+        checkpoint: Path to the pre-trained AlphaFold3 model checkpoint file
+        cache_dir: Directory for caching prediction outputs (created if doesn't exist)
+        precision: Precision for model inference ('float32', 'float16', 'bfloat16')
+                   Note: Currently not fully implemented
+
+    Example:
+        # Start web app with default cache directory
+        $ alphafold3-app --checkpoint weights.ckpt
+
+        # Start with custom cache directory
+        $ alphafold3-app --checkpoint weights.ckpt --cache-dir /tmp/af3_cache
+
+    Note:
+        The cache directory is cleared on startup to ensure fresh predictions.
+        Old predictions from previous sessions will be deleted.
+    """
     path = Path(checkpoint)
     assert path.exists(), "checkpoint does not exist at path"
 

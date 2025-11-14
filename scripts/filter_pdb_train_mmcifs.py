@@ -1,3 +1,55 @@
+"""
+PDB Training Dataset Filtering for AlphaFold 3.
+
+This script filters and curates mmCIF files to create the AlphaFold 3 PDB training dataset.
+It implements the comprehensive filtering procedure outlined in Abramson et al (2024), which
+includes both target-level and bioassembly-level filters to ensure high-quality training data.
+
+Target-Level Filtering:
+    1. PDB release date must be before 2021-09-30
+    2. Resolution must be ≤ 9 Å
+    3. Maximum 300 polymer chains for training (1000 for evaluation)
+    4. Polymer chains must have ≥ 4 resolved residues
+
+Bioassembly-Level Filtering:
+    1. Remove all hydrogen atoms
+    2. Remove polymer chains with all unknown residues
+    3. Remove clashing chains (>30% atoms within 1.7 Å of another chain)
+       - Chain with higher clash percentage is removed
+       - If tied, chain with fewer atoms is removed
+       - If still tied, chain with larger ID is removed
+    4. Remove atoms not in CCD (Chemical Component Dictionary) definition
+    5. Remove leaving atoms from covalent ligands
+    6. Remove protein chains with consecutive Cα atoms >10 Å apart
+    7. For assemblies with >20 chains, select 20 closest chains to a random interface
+    8. Remove crystallization aids (for crystallography structures)
+
+Clashing Chain Removal:
+    Clashing is defined as >30% of a chain's atoms being within 1.7 Å of atoms
+    in another chain. The resolution strategy prevents removing both chains and
+    ensures deterministic behavior.
+
+Large Assembly Handling:
+    For structures with >20 chains, a random interface token is selected, and the
+    20 chains closest to it are retained. This reduces computational cost while
+    preserving biologically relevant interactions.
+
+Usage:
+    python filter_pdb_train_mmcifs.py -i <assembly_dir> -a <asym_dir> -c <ccd_dir> -o <output_dir>
+
+Required Inputs:
+    - Assembly mmCIF files (biological assembly 1)
+    - Asymmetric unit mmCIF files (for metadata)
+    - Chemical Component Dictionary (CCD) files
+
+Output:
+    Filtered mmCIF files organized in subdirectories by PDB ID middle characters
+
+See Also:
+    - cluster_pdb_train_mmcifs.py: For clustering the filtered training structures
+    - filter_pdb_val_mmcifs.py: For validation dataset filtering
+"""
+
 # %% [markdown]
 # # Curating AlphaFold 3 PDB Training Dataset
 #
@@ -16,7 +68,7 @@
 # in another chain. If two chains are clashing with each other, the chain with the greater percentage of clashing
 # atoms will be removed. If the same fraction of atoms are clashing, the chain with fewer total atoms is removed.
 # If the chains have the same number of atoms, then the chain with the larger chain id is removed.
-# 4. For molecules or small molecules with CCD codes, atoms outside of the CCD code’s defined set of atom names are
+# 4. For molecules or small molecules with CCD codes, atoms outside of the CCD code's defined set of atom names are
 # removed.
 # 5. Leaving atoms (ligand atom or groups of atoms that detach when bonds form) for covalent ligands are filtered
 # out.

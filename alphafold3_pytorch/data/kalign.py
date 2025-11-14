@@ -12,7 +12,33 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""A Python wrapper for Kalign."""
+
+"""
+Kalign Python Wrapper
+
+This module provides a Python wrapper for Kalign, a fast and accurate multiple sequence alignment tool.
+Kalign is used in AlphaFold 3 for aligning template sequences to query sequences, which is essential
+for extracting template features during structure prediction.
+
+The module includes:
+- Kalign class: A wrapper for the Kalign binary executable
+- _to_a3m: Converts sequences to A3M format for Kalign input
+- _realign_pdb_template_to_query: Aligns template sequences to query sequences using Kalign
+
+Kalign is particularly useful for:
+- Aligning protein, DNA, and RNA sequences
+- Realigning template structures to query sequences
+- Ensuring proper correspondence between template and query residues
+
+Key functions:
+- _realign_pdb_template_to_query: Main function for template-to-query alignment
+- Kalign.align: Executes Kalign alignment and returns results in A3M format
+
+References:
+- Kalign: https://github.com/TimoLassmann/kalign
+- AlphaFold: https://github.com/deepmind/alphafold
+"""
+
 import os
 import subprocess  # nosec
 import tempfile
@@ -28,11 +54,36 @@ from alphafold3_pytorch.utils.utils import exists
 
 
 def _to_a3m(sequences: Sequence[str]) -> str:
-    """Converts sequences to an a3m file."""
+    """
+    Converts a list of sequences to A3M format string.
+
+    A3M is a compact multiple sequence alignment format that uses lowercase letters
+    to represent insertions. This function creates a simple A3M-formatted string
+    from a list of sequences, assigning sequential names to each sequence.
+
+    Args:
+        sequences: A list of sequence strings to convert. Can be protein, DNA, or RNA sequences.
+
+    Returns:
+        A string in A3M format with each sequence preceded by a header line starting with '>'.
+        The format is:
+            >sequence 1
+            SEQUENCE_DATA
+            >sequence 2
+            SEQUENCE_DATA
+            ...
+
+    Example:
+        >>> _to_a3m(['ACDEFGH', 'ACDEFGH'])
+        '>sequence 1\\nACDEFGH\\n>sequence 2\\nACDEFGH\\n'
+    """
+    # Generate simple sequential names for each sequence
     names = ["sequence %d" % i for i in range(1, len(sequences) + 1)]
     a3m = []
     for sequence, name in zip(sequences, names):
+        # Add FASTA-style header
         a3m.append(">" + name + "\n")
+        # Add sequence data
         a3m.append(sequence + "\n")
     return "".join(a3m)
 
@@ -82,10 +133,15 @@ def _realign_pdb_template_to_query(
     aligner = Kalign(binary_path=kalign_binary_path)
 
     try:
+        # Align the query and template sequences using Kalign
+        # This produces an A3M alignment with both sequences aligned
         parsed_a3m = msa_parsing.parse_a3m(
             aligner.align([query_sequence, template_sequence]),
             template_type,
         )
+        # Extract the two aligned sequences:
+        # - old_aligned_template: the query sequence with gaps
+        # - new_aligned_template: the actual template sequence with gaps
         old_aligned_template, new_aligned_template = parsed_a3m.sequences
     except Exception as e:
         raise QueryToTemplateAlignError(
@@ -104,21 +160,28 @@ def _realign_pdb_template_to_query(
             new_aligned_template,
         )
 
+    # Build a mapping from old template indices to new template indices
+    # by walking through the aligned sequences position by position
     old_to_new_template_mapping = {}
-    old_template_index = -1
-    new_template_index = -1
-    num_same = 0
+    old_template_index = -1  # Index in the query (old template) sequence without gaps
+    new_template_index = -1  # Index in the actual template sequence without gaps
+    num_same = 0  # Count of matching residues between sequences
+
     for old_template_res, new_template_res in zip(old_aligned_template, new_aligned_template):
+        # Increment index when we encounter a non-gap character in old template (query)
         if old_template_res != "-":
             old_template_index += 1
+        # Increment index when we encounter a non-gap character in new template (actual)
         if new_template_res != "-":
             new_template_index += 1
+        # When both positions are non-gap, create a mapping and check for matches
         if old_template_res != "-" and new_template_res != "-":
             old_to_new_template_mapping[old_template_index] = new_template_index
             if old_template_res == new_template_res:
                 num_same += 1
 
-    # Require at least (by default) 10 % sequence identity w.r.t. to the shorter of the sequences.
+    # Verify that the sequences have sufficient similarity
+    # Require at least (by default) 10% sequence identity w.r.t. the shorter sequence
     frac_matching = float(num_same) / min(len(query_sequence), len(template_sequence))
     if frac_matching < min_frac_matching:
         raise QueryToTemplateAlignError(
@@ -132,10 +195,12 @@ def _realign_pdb_template_to_query(
             )
         )
 
+    # Update the original query-to-template mapping with the new template indices
+    # This translates from query positions to actual template positions
     new_query_to_template_mapping = {}
     for query_index, old_template_index in old_mapping.items():
         new_query_to_template_mapping[query_index] = old_to_new_template_mapping.get(
-            old_template_index, -1
+            old_template_index, -1  # Use -1 for positions that don't map
         )
 
     template_sequence = template_sequence.replace("-", "")

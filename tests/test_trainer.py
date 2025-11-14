@@ -1,4 +1,22 @@
+"""
+Comprehensive test suite for the AlphaFold3 Trainer class.
+
+This module tests the training infrastructure, including:
+- Trainer initialization and configuration
+- Training loops with gradient accumulation
+- Validation and testing loops
+- Model checkpointing and loading
+- Exponential moving average (EMA) of model weights
+- Dataset integration (AtomDataset, PDBDataset)
+- YAML configuration loading for trainer setup
+- Conductor-based training orchestration
+
+The Trainer class handles all aspects of model training, making these tests
+critical for ensuring reliable and reproducible training runs.
+"""
+
 import os
+# Enable type checking for better error messages
 os.environ['TYPECHECK'] = 'True'
 
 import shutil
@@ -24,24 +42,45 @@ from alphafold3_pytorch import (
 
 from alphafold3_pytorch.mocks import MockAtomDataset
 
+# PDB ID used for testing
 DATA_TEST_PDB_ID = '209d'
 
 def exists(v):
+    """Simple helper to check if a value is not None."""
     return v is not None
 
 @pytest.fixture()
 def remove_test_folders():
+    """
+    Pytest fixture to clean up test folders after tests complete.
+
+    This ensures test artifacts don't accumulate in the repository.
+    """
     yield
     shutil.rmtree('./test-folder')
 
 def test_trainer_with_mock_atom_input(remove_test_folders):
+    """
+    Test the Trainer class with mock atom inputs.
 
+    This validates core trainer functionality:
+    1. Model saving and loading with hyperparameters
+    2. Training loop execution with gradient accumulation
+    3. Validation loop execution
+    4. Checkpoint creation and restoration
+    5. EMA (Exponential Moving Average) weight updates
+    6. Loading from both model checkpoints and training state
+
+    Using mock data allows fast testing without requiring real PDB files.
+    """
+
+    # Create a minimal AlphaFold3 model for fast testing
     alphafold3 = Alphafold3(
         dim_atom_inputs = 77,
         dim_template_feats = 108,
         num_dist_bins = 64,
         confidence_head_kwargs = dict(
-            pairformer_depth = 1
+            pairformer_depth = 1  # Shallow network for speed
         ),
         template_embedder_kwargs = dict(
             pairformer_stack_depth = 1
@@ -59,83 +98,93 @@ def test_trainer_with_mock_atom_input(remove_test_folders):
         ),
     )
 
+    # Create mock datasets for training, validation, and testing
     dataset = MockAtomDataset(100)
     valid_dataset = MockAtomDataset(4)
     test_dataset = MockAtomDataset(2)
 
-    # test saving and loading from Alphafold3, independent of lightning
+    # Test model saving and loading (independent of trainer)
 
     dataloader = DataLoader(dataset, batch_size = 2)
     inputs = next(iter(dataloader))
 
+    # Run forward pass before saving to get reference output
     alphafold3.eval()
     _, breakdown = alphafold3(**inputs.model_forward_dict(), return_loss_breakdown = True)
     before_distogram = breakdown.distogram
 
+    # Save model with hyperparameters
     path = './test-folder/nested/folder/af3'
     alphafold3.save(path, overwrite = True)
 
-    # load from scratch, along with saved hyperparameters
-
+    # Load model from scratch (including hyperparameters)
     alphafold3 = Alphafold3.init_and_load(path)
 
+    # Verify loaded model produces identical output
     alphafold3.eval()
     _, breakdown = alphafold3(**inputs.model_forward_dict(), return_loss_breakdown = True)
     after_distogram = breakdown.distogram
 
     assert torch.allclose(before_distogram, after_distogram)
 
-    # test training + validation
+    # Test training with validation
 
     trainer = Trainer(
         alphafold3,
         dataset = dataset,
         valid_dataset = valid_dataset,
         test_dataset = test_dataset,
-        accelerator = 'cpu',
-        num_train_steps = 2,
+        accelerator = 'cpu',  # Use CPU for testing (no GPU required)
+        num_train_steps = 2,  # Just a few steps for testing
         batch_size = 1,
-        valid_every = 1,
-        grad_accum_every = 2,
-        checkpoint_every = 1,
+        valid_every = 1,  # Validate after each training step
+        grad_accum_every = 2,  # Test gradient accumulation
+        checkpoint_every = 1,  # Save checkpoint after each step
         checkpoint_folder = './test-folder/checkpoints',
         overwrite_checkpoints = True,
-        ema_kwargs = dict(
+        ema_kwargs = dict(  # Test EMA functionality
             use_foreach = True,
             update_after_step = 0,
             update_every = 1
         )
     )
 
+    # Run training
     trainer()
 
-    # assert checkpoints created
-
+    # Verify checkpoint was created
     assert Path(f'./test-folder/checkpoints/({trainer.train_id})_af3.ckpt.1.pt').exists()
 
-    # assert can load latest checkpoint by loading from a directory
-
+    # Test loading checkpoint from directory (loads latest)
     trainer.load('./test-folder/checkpoints', strict = False)
 
     assert exists(trainer.model_loaded_from_path)
 
-    # saving and loading from trainer
-
+    # Test saving and loading trainer state (includes optimizer, scheduler, etc.)
     trainer.save('./test-folder/nested/folder2/training.pt', overwrite = True)
     trainer.load('./test-folder/nested/folder2/training.pt', strict = False)
 
-    # allow for only loading model, needed for fine-tuning logic
-
+    # Test loading only model weights (for fine-tuning)
     trainer.load('./test-folder/nested/folder2/training.pt', only_model = True, strict = False)
 
-    # also allow for loading Alphafold3 directly from training ckpt
-
+    # Test loading AlphaFold3 model directly from trainer checkpoint
     alphafold3 = Alphafold3.init_and_load('./test-folder/nested/folder2/training.pt')
 
-# testing trainer with pdb inputs
+# Tests for trainer with PDB inputs (real structure files)
 
 @pytest.fixture()
 def populate_mock_pdb_and_remove_test_folders():
+    """
+    Pytest fixture to set up and tear down mock PDB datasets for trainer testing.
+
+    This creates a realistic test environment with:
+    - Train, validation, and test split directories
+    - Copies of real mmCIF files for each split
+    - Automatic cleanup after tests complete
+
+    This allows testing the full training pipeline with PDB files without
+    requiring a large dataset or long training times.
+    """
     proj_root = Path('.')
     working_cif_file = proj_root / 'data' / 'test' / 'pdb_data' / 'mmcifs' / DATA_TEST_PDB_ID[1:3] / f'{DATA_TEST_PDB_ID}-assembly1.cif'
 
@@ -164,6 +213,18 @@ def populate_mock_pdb_and_remove_test_folders():
     shutil.rmtree('./test-folder')
 
 def test_trainer_with_pdb_input(populate_mock_pdb_and_remove_test_folders):
+    """
+    Test the Trainer class with PDBDataset inputs.
+
+    This validates that the trainer works correctly with real PDB files:
+    1. PDBDataset can load and process mmCIF files
+    2. Data flows correctly from PDB files through the model
+    3. Training, validation, and checkpointing work with PDB inputs
+    4. Model state can be saved and loaded correctly
+
+    This is a more realistic test than using mock data, ensuring the full
+    pipeline from PDB files to trained model works correctly.
+    """
 
     alphafold3 = Alphafold3(
         dim_atom=4,
@@ -282,9 +343,20 @@ def test_trainer_with_pdb_input(populate_mock_pdb_and_remove_test_folders):
 
     alphafold3 = Alphafold3.init_and_load('./test-folder/nested/folder2/training.pt')
 
-# test use of collation fn outside of trainer
+# Test collation function for batching inputs
 
 def test_collate_fn():
+    """
+    Test the collation function for batching multiple AtomInputs.
+
+    This validates that:
+    1. Multiple AtomInput objects can be batched together
+    2. The batched input works correctly with the model
+    3. Gradients can be computed through batched inputs
+
+    The collation function is critical for efficient training as it handles
+    padding, masking, and tensor stacking for variable-sized inputs.
+    """
     alphafold3 = Alphafold3(
         dim_atom_inputs = 77,
         dim_template_feats = 108,
@@ -314,9 +386,20 @@ def test_collate_fn():
 
     _, breakdown = alphafold3(**batched_atom_inputs.model_forward_dict(), return_loss_breakdown = True)
 
-# test creating trainer + alphafold3 from config
+# Tests for creating trainer from YAML configuration
 
 def test_trainer_config(remove_test_folders):
+    """
+    Test creating a trainer from YAML configuration.
+
+    This validates that:
+    1. Trainer can be instantiated from YAML config
+    2. Model configuration is correctly parsed
+    3. Training can proceed with config-specified parameters
+
+    YAML configuration allows users to specify training setups in a reproducible,
+    version-controllable way without writing Python code.
+    """
     curr_dir = Path(__file__).parents[0]
     trainer_yaml_path = curr_dir / 'configs/trainer.yaml'
 
@@ -331,9 +414,19 @@ def test_trainer_config(remove_test_folders):
 
     trainer()
 
-# test creating trainer + alphafold3 along with pdb dataset from config
+# Test creating trainer with PDB dataset from config
 
 def test_trainer_config_with_pdb_dataset(populate_mock_pdb_and_remove_test_folders):
+    """
+    Test creating trainer with PDBDataset from YAML configuration.
+
+    This validates that:
+    1. YAML config can specify PDBDataset parameters
+    2. Trainer correctly initializes with PDB data
+    3. Training works end-to-end from config
+
+    This is important for production training setups that use PDB files.
+    """
     curr_dir = Path(__file__).parents[0]
     trainer_yaml_path = curr_dir / 'configs/trainer_with_pdb_dataset.yaml'
 
@@ -345,9 +438,20 @@ def test_trainer_config_with_pdb_dataset(populate_mock_pdb_and_remove_test_folde
 
     trainer()
 
-# test creating trainer + alphafold3 along with atom dataset from config
+# Test creating trainer with AtomDataset from config
 
 def test_trainer_config_with_atom_dataset(remove_test_folders):
+    """
+    Test creating trainer with AtomDataset from YAML configuration.
+
+    This validates that:
+    1. YAML config can specify AtomDataset parameters
+    2. Trainer correctly initializes with preprocessed atom inputs
+    3. Training works with cached/preprocessed data
+
+    Using AtomDataset allows faster training by preprocessing features once
+    and loading them from disk, rather than processing PDB files each time.
+    """
 
     curr_dir = Path(__file__).parents[0]
 
@@ -374,9 +478,20 @@ def test_trainer_config_with_atom_dataset(remove_test_folders):
 
     trainer()
 
-# test creating trainer + alphafold3 with atom dataset that is precomputed from a pdb dataset
+# Test creating trainer with AtomDataset precomputed from PDBDataset
 
 def test_trainer_config_with_atom_dataset_from_pdb_dataset(populate_mock_pdb_and_remove_test_folders):
+    """
+    Test creating trainer with AtomDataset derived from PDBDataset via config.
+
+    This validates a common workflow:
+    1. PDBDataset is used to load structures from PDB files
+    2. Features are extracted and saved as AtomInputs
+    3. Training uses the preprocessed AtomDataset for faster iteration
+
+    This two-stage approach is common in production: preprocess once,
+    then train/experiment many times with the cached features.
+    """
 
     curr_dir = Path(__file__).parents[0]
     trainer_yaml_path = curr_dir / 'configs/trainer_with_atom_dataset_created_from_pdb.yaml'
@@ -389,9 +504,20 @@ def test_trainer_config_with_atom_dataset_from_pdb_dataset(populate_mock_pdb_and
 
     trainer()
 
-# test creating trainer without model, given when creating instance
+# Test creating trainer without model in config (model passed separately)
 
 def test_trainer_config_without_model(remove_test_folders):
+    """
+    Test creating trainer where model is passed separately from config.
+
+    This validates a flexible configuration pattern:
+    1. Trainer config specifies training parameters only
+    2. Model is created separately (e.g., from different config or code)
+    3. Model and trainer are combined at runtime
+
+    This is useful for programmatic experiment setups where the model
+    might be varied while keeping training parameters constant.
+    """
     curr_dir = Path(__file__).parents[0]
 
     af3_yaml_path = curr_dir / 'configs/alphafold3.yaml'
@@ -407,9 +533,20 @@ def test_trainer_config_without_model(remove_test_folders):
 
     assert isinstance(trainer, Trainer)
 
-# test creating trainer from training config yaml
+# Test creating trainer using conductor configuration
 
 def test_conductor_config():
+    """
+    Test creating trainer from conductor-style training configuration.
+
+    This validates the "conductor" pattern for orchestrating multiple training runs:
+    1. A single config file can specify multiple related training runs
+    2. Each run can have its own name and parameters
+    3. Checkpoints are organized by run name
+
+    The conductor pattern is useful for complex training setups like pre-training
+    followed by fine-tuning, or training multiple model variants.
+    """
     curr_dir = Path(__file__).parents[0]
     training_yaml_path = curr_dir / 'configs/training.yaml'
 
@@ -424,9 +561,20 @@ def test_conductor_config():
     assert str(trainer.checkpoint_folder) == 'test-folder/main-and-finetuning/main'
     assert str(trainer.checkpoint_prefix) == 'af3.main.ckpt.'
 
-# test creating trainer from training config yaml + pdb datasets
+# Test creating trainer from conductor config with PDB datasets
 
 def test_conductor_config_with_pdb_datasets(populate_mock_pdb_and_remove_test_folders):
+    """
+    Test creating trainer from conductor config with PDBDataset integration.
+
+    This validates the conductor pattern with real PDB data:
+    1. Conductor config can specify PDBDataset parameters
+    2. Multiple training runs can share the same dataset configuration
+    3. Training works end-to-end with PDB files
+
+    This is the most realistic test, combining conductor orchestration
+    with actual structural biology data.
+    """
     curr_dir = Path(__file__).parents[0]
     training_yaml_path = curr_dir / 'configs/training_with_pdb_dataset.yaml'
 

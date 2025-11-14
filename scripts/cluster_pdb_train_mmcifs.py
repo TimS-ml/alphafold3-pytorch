@@ -1,3 +1,51 @@
+"""
+PDB Training Dataset Clustering for AlphaFold 3.
+
+This script performs chain-based and interface-based clustering on the AlphaFold 3 PDB
+training dataset to reduce bias in training and evaluation. The clustering procedure follows
+the methodology outlined in Abramson et al (2024) and uses MMseqs2 for sequence clustering.
+
+Chain-Based Clustering:
+    - Proteins: 40% sequence identity threshold
+    - Nucleic acids (RNA/DNA): 100% sequence identity (identical sequences only)
+    - Peptides (<10 residues): 100% sequence identity
+    - Ligands: CCD (Chemical Component Dictionary) code identity
+
+Modified Residue Handling:
+    Modified residues are mapped to standard residues using SCOP convention:
+    1. Look up modified residue in BioPython's extended residue mappings
+    2. If found and maps to single character, use the standard residue
+    3. Otherwise, map to unknown residue type ('X')
+
+Interface-Based Clustering:
+    Interfaces are clustered based on their constituent chain clusters. Two interfaces
+    I and J belong to the same interface cluster if and only if their constituent chain
+    pairs {I_1, I_2} and {J_1, J_2} have the same chain cluster pairs {C_1^chain, C_2^chain}.
+
+    Interface definition:
+    - Pairs of chains with minimum heavy atom separation < 5 Å
+    - Heavy atoms exclude hydrogens
+
+Clustering Tools:
+    - MMseqs2 (easy-cluster): For protein, nucleic acid, and peptide clustering
+    - Custom CCD-based: For ligand clustering
+
+Output Files:
+    - sequences.fasta: FASTA files for each molecule type
+    - *_chain_cluster_mapping.csv: Chain to cluster ID mappings
+    - interface_cluster_mapping.csv: Interface cluster assignments
+    - all_chain_sequences.json: Cached chain sequences
+    - interface_chain_ids.json: Cached interface definitions
+
+Usage:
+    python cluster_pdb_train_mmcifs.py --mmcif_dir <dir> --output_dir <dir> -n <workers>
+
+See Also:
+    - filter_pdb_train_mmcifs.py: For pre-filtering structures before clustering
+    - cluster_pdb_val_mmcifs.py: For validation set clustering with homology filtering
+    - cluster_pdb_test_mmcifs.py: For test set clustering with homology filtering
+"""
+
 # %% [markdown]
 # # Clustering AlphaFold 3 PDB Training Dataset
 #

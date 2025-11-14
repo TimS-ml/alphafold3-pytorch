@@ -1,4 +1,34 @@
-"""MSA loading functions used in AlphaFold2."""
+"""
+Multiple Sequence Alignment (MSA) Parsing Module
+
+This module provides functions for parsing and processing multiple sequence alignments (MSAs)
+in various formats, particularly A3M and FASTA formats. MSAs are critical input features for
+AlphaFold 3, providing evolutionary information that helps predict protein structure.
+
+The module handles:
+- Parsing A3M format alignments (with insertion/deletion information)
+- Parsing FASTA format sequences
+- Extracting species and accession identifiers from MSA headers
+- Supporting protein, DNA, RNA, and ligand sequences
+- Handling compressed (gzip) MSA files
+
+Key classes:
+- Msa: Container for MSA data including sequences, deletion matrix, and descriptions
+- Identifiers: Stores extracted species and accession information
+
+Key functions:
+- parse_a3m: Parse A3M format alignments with deletion information
+- parse_fasta: Parse FASTA format sequences
+- get_identifiers: Extract species and accession identifiers from sequence headers
+- get_msa_type: Determine molecule type (protein/DNA/RNA/ligand)
+- is_gzip_file: Check if a file is gzip compressed
+
+The parsing follows AlphaFold conventions for handling UniProt identifiers and
+species information, which is used for MSA pairing across chains.
+
+Reference:
+- Original AlphaFold implementation: https://github.com/google-deepmind/alphafold
+"""
 
 # From: https://github.com/google-deepmind/alphafold/blob/f251de6613cb478207c732bf9627b1e853c99c2f/alphafold/data/parsers.py#L157
 
@@ -55,6 +85,16 @@ _UNIPROT_PATTERN = re.compile(
 
 @dataclasses.dataclass(frozen=True)
 class Identifiers:
+    """
+    Container for sequence identifiers extracted from MSA headers.
+
+    This class stores metadata extracted from sequence descriptions, particularly
+    species information which is used for MSA pairing in multi-chain predictions.
+
+    Attributes:
+        species_id: Species identifier code (e.g., 'HUMAN', 'ECOLI'). Empty string
+            if no species information could be extracted.
+    """
     species_id: str = ""
 
 
@@ -149,7 +189,20 @@ def get_identifiers(
 
 @dataclasses.dataclass(frozen=True)
 class Msa:
-    """Class representing a parsed MSA file."""
+    """
+    Container class representing a parsed multiple sequence alignment (MSA).
+
+    An MSA contains multiple sequences aligned to a query sequence, along with
+    deletion information and sequence descriptions. This class ensures data
+    consistency and provides utility methods for MSA manipulation.
+
+    Attributes:
+        sequences: List of aligned sequences (gaps removed, uppercase only).
+        deletion_matrix: 2D list where deletion_matrix[i][j] is the number of
+            insertions (lowercase residues in A3M) at position j in sequence i.
+        descriptions: List of sequence descriptions/headers (one per sequence).
+        msa_type: The molecule type ('protein', 'dna', 'rna', or 'ligand').
+    """
 
     sequences: Sequence[str]
     deletion_matrix: DeletionMatrix
@@ -157,7 +210,13 @@ class Msa:
     msa_type: MSA_TYPE
 
     def __post_init__(self):
-        """Checks that all fields have the same length."""
+        """
+        Validates that all MSA components have consistent lengths.
+
+        Raises:
+            ValueError: If sequences, deletion_matrix, and descriptions don't all
+                have the same length.
+        """
         if not (len(self.sequences) == len(self.deletion_matrix) == len(self.descriptions)):
             raise ValueError(
                 "All fields for an MSA must have the same length. "
@@ -167,11 +226,24 @@ class Msa:
             )
 
     def __len__(self):
-        """Returns the number of sequences in the MSA."""
+        """
+        Returns the number of sequences in the MSA.
+
+        Returns:
+            The number of sequences (alignment depth).
+        """
         return len(self.sequences)
 
     def __add__(self, other):
-        """Concatenates two MSAs."""
+        """
+        Concatenates two MSAs of the same type.
+
+        Args:
+            other: Another Msa object to concatenate with this one.
+
+        Returns:
+            A new Msa object containing sequences from both MSAs.
+        """
         return Msa(
             sequences=self.sequences + other.sequences,
             deletion_matrix=self.deletion_matrix + other.deletion_matrix,
@@ -180,7 +252,17 @@ class Msa:
         )
 
     def truncate(self, max_seqs: int):
-        """Truncates the MSA to the first `max_seqs` sequences."""
+        """
+        Truncates the MSA to the first `max_seqs` sequences.
+
+        Keeps the query sequence (first sequence) and the next max_seqs-1 sequences.
+
+        Args:
+            max_seqs: Maximum number of sequences to retain.
+
+        Returns:
+            A new Msa object with at most max_seqs sequences.
+        """
         max_seqs = min(len(self.sequences), max_seqs)
         return Msa(
             sequences=self.sequences[:max_seqs],
@@ -190,7 +272,18 @@ class Msa:
         )
 
     def random_truncate(self, max_seqs: int):
-        """Truncates the MSA to a random range of `max_seqs` sequences."""
+        """
+        Randomly truncates the MSA to `max_seqs` sequences.
+
+        Selects a random contiguous window of max_seqs sequences. Useful for
+        data augmentation during training.
+
+        Args:
+            max_seqs: Number of sequences to retain.
+
+        Returns:
+            A new Msa object with max_seqs sequences from a random position.
+        """
         max_seqs = min(len(self.sequences), max_seqs)
         start = random.randint(0, len(self.sequences) - max_seqs)  # nosec
         return Msa(

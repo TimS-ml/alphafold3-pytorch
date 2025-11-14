@@ -1,3 +1,19 @@
+"""
+Comprehensive test suite for AlphaFold3 input handling and data processing.
+
+This module tests various input modalities and transformations, including:
+- Alphafold3Input: high-level API for creating inputs from sequences
+- PDBInput: loading structures from PDB/mmCIF files
+- AtomInput: low-level atom-based input representation
+- Biomolecule: internal representation of molecular structures
+- Reverse complement operations for nucleic acids
+- mmCIF file I/O and format conversions
+- Dataset classes for batch processing
+
+These tests ensure that AlphaFold3 can accept inputs in various formats and
+correctly transform them into the internal tensor representation required by the model.
+"""
+
 import os
 import pytest
 import shutil
@@ -41,50 +57,111 @@ from alphafold3_pytorch.life import (
 
 from alphafold3_pytorch.mocks import MockAtomDataset
 
+# PDB ID used for testing input processing
 DATA_TEST_PDB_ID = '7a4d'
 
-# reverse complements
+# Tests for reverse complement operations (DNA/RNA sequence manipulation)
 
 def test_string_reverse_complement():
+    """
+    Test reverse complement operation on nucleic acid sequence strings.
+
+    Reverse complement is essential for processing DNA/RNA sequences, as
+    biological molecules are often represented in different orientations.
+    This ensures we correctly handle both DNA ('ATCG') and RNA ('AUCG') sequences.
+    """
+    # Test DNA reverse complement: ATCG -> CGAT
     assert reverse_complement('ATCG') == 'CGAT'
+    # Test RNA reverse complement: AUCG -> CGAU
     assert reverse_complement('AUCG', 'rna') == 'CGAU'
 
 def test_tensor_reverse_complement():
+    """
+    Test reverse complement operation on tensor-encoded nucleic acid sequences.
+
+    This validates that reverse complement works on the tensor representation
+    used internally by the model. Double reverse complement should return the
+    original sequence, serving as a consistency check.
+    """
+    # Create random nucleotide sequence (5 possible values including gap/unknown)
     seq = torch.randint(0, 5, (100,))
+    # Apply reverse complement
     rc = reverse_complement_tensor(seq)
+    # Double reverse complement should equal original
     assert torch.allclose(reverse_complement_tensor(rc), seq)
 
-# atom input
+# Tests for AtomInput serialization and dataset loading
 
 def test_atom_input_to_file_and_from():
+    """
+    Test serialization and deserialization of AtomInput objects.
+
+    This validates that AtomInput objects can be saved to disk and loaded back
+    without data loss. This is important for caching preprocessed inputs to speed
+    up training, as feature extraction from raw sequences can be computationally expensive.
+    """
+    # Create a mock atom input
     mock_atom_dataset = MockAtomDataset(64)
     atom_input = mock_atom_dataset[0]
 
+    # Save to file and reload
     file = atom_input_to_file(atom_input, './test-atom-input.pt', overwrite = True)
     atom_input_reconstituted = file_to_atom_input(str(file))
+
+    # Verify that atom features are preserved exactly
     assert torch.allclose(atom_input.atom_inputs, atom_input_reconstituted.atom_inputs)
 
 def test_atom_dataset():
+    """
+    Test the AtomDataset class for batch loading of preprocessed inputs.
+
+    This validates that:
+    1. Multiple AtomInput objects can be saved to a directory
+    2. AtomDataset can load all inputs from that directory
+    3. The dataset length matches the number of saved files
+
+    Using preprocessed AtomInputs is faster than processing from raw PDB files
+    during training, as feature extraction is done once and cached.
+    """
     num_atom_inputs = 10
     test_folder = './test_atom_folder'
 
+    # Create and save mock atom inputs
     mock_atom_dataset = MockAtomDataset(num_atom_inputs)
 
     for i in range(num_atom_inputs):
         atom_input = mock_atom_dataset[i]
         atom_input_to_file(atom_input, f'{test_folder}/{i}.pt', overwrite = True)
 
+    # Load all inputs using AtomDataset
     atom_dataset_from_disk = AtomDataset(test_folder)
     assert len(atom_dataset_from_disk) == num_atom_inputs
 
+    # Clean up test directory
     shutil.rmtree(test_folder, ignore_errors = True)
 
-# alphafold3 input
+# Tests for Alphafold3Input (high-level API)
 
 @pytest.mark.parametrize('directed_bonds', (False, True))
 def test_alphafold3_input(
     directed_bonds
 ):
+    """
+    Test the Alphafold3Input class for multi-molecule complexes.
+
+    This validates that Alphafold3Input can handle diverse molecular inputs:
+    - Proteins (multiple chains)
+    - DNA (double-stranded and single-stranded)
+    - RNA (double-stranded and single-stranded)
+    - Metal ions
+    - Small molecule ligands
+    - Miscellaneous molecules
+
+    The test also verifies:
+    - Automatic atom ID and bond extraction
+    - Support for directed vs undirected bonds
+    - Proper conversion to batched model input format
+    """
 
     CUSTOM_ATOMS = list({*ATOMS, 'Na', 'Fe', 'Si', 'F', 'K'})
 

@@ -1,3 +1,43 @@
+"""
+PDB Test/Evaluation Dataset Filtering for AlphaFold 3.
+
+This script filters and curates mmCIF files to create the AlphaFold 3 PDB test (evaluation)
+dataset used for benchmarking trained models. The test set consists of recent PDB structures
+released between 2023-01-14 and 2024-04-30, ensuring temporal separation from training/validation data.
+
+The filtering procedure follows a modified version of the evaluation procedure outlined in
+Abramson et al (2024):
+
+Test Set Construction:
+    1. Select all PDB entries released between 2023-01-14 and 2024-04-30
+    2. Expand asymmetric units to Biological Assembly 1
+    3. Filter to non-NMR entries with resolution < 4.5 Å
+    4. Filter to complexes with < 5,120 tokens
+    5. Remove crystallization aids for prediction and scoring
+
+Filtering Criteria:
+    - Release date: 2023-01-14 to 2024-04-30
+    - Exclude NMR structures
+    - Maximum resolution: 4.5 Å (exclusive)
+    - Maximum tokens: 5,120 (exclusive)
+    - Ligands in exclusion set are removed
+    - Crystallization aids are removed
+    - Hydrogens and waters are removed
+
+Temporal Separation:
+    - Training set: up to 2021-09-30
+    - Validation set: 2021-10-01 to 2023-01-13
+    - Test set: 2023-01-14 to 2024-04-30
+
+Usage:
+    python filter_pdb_test_mmcifs.py -i <input_dir> -a <asym_dir> -o <output_dir>
+
+See Also:
+    - cluster_pdb_test_mmcifs.py: For low-homology clustering of test structures
+    - filter_pdb_train_mmcifs.py: For training dataset filtering procedures
+    - filter_pdb_val_mmcifs.py: For validation dataset filtering procedures
+"""
+
 # %% [markdown]
 # # Curating AlphaFold 3 PDB Evaluation Dataset
 #
@@ -52,7 +92,28 @@ from scripts.filter_pdb_val_mmcifs import filter_num_tokens
 
 @typecheck
 def filter_experiment_type(mmcif_object: MmcifObject, types_to_ignore: List[str]) -> bool:
-    """Filter based on experiment type."""
+    """
+    Filter structures based on experimental method type.
+
+    This function excludes structures determined by certain experimental methods,
+    such as NMR (Nuclear Magnetic Resonance), which may not provide the same level
+    of structural detail as X-ray crystallography or cryo-EM.
+
+    Args:
+        mmcif_object: Parsed mmCIF structure object
+        types_to_ignore: List of experiment types to exclude (e.g., ["NMR"])
+
+    Returns:
+        bool: True if the structure passes the filter (uses an allowed method),
+            False if it should be excluded (uses an ignored method).
+
+    Note:
+        The comparison is case-insensitive. Common experimental methods include:
+        - X-RAY DIFFRACTION
+        - ELECTRON MICROSCOPY
+        - SOLUTION NMR
+        - SOLID-STATE NMR
+    """
     return (
         "structure_method" in mmcif_object.header
         and exists(mmcif_object.header["structure_method"])

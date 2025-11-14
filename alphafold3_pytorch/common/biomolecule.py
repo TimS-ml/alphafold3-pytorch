@@ -1,4 +1,37 @@
-"""A generic `Biomolecule` data structure for parsing macromolecular structures."""
+"""Biomolecule data structure and mmCIF parsing/writing utilities.
+
+This module provides the core data structure (`Biomolecule`) for representing
+macromolecular complexes in AlphaFold 3, along with utilities for:
+- Parsing mmCIF files into Biomolecule objects
+- Converting Biomolecule objects back to mmCIF format
+- Cropping and filtering biomolecular structures
+- Handling mixed biomolecule complexes (protein, RNA, DNA, ligands)
+
+The Biomolecule class is a dataclass that stores:
+- Atom positions and masks (which atoms are present)
+- Residue types and chemical identifiers
+- Chain and residue indexing
+- B-factors (confidence scores or temperature factors)
+- Chemical composition metadata
+- mmCIF metadata for round-trip conversion
+- Inter-residue bonds and connectivity
+- Entity-to-chain mappings
+
+Key features:
+- Unified representation for proteins, nucleic acids, and ligands
+- Support for non-standard residues and modifications
+- Efficient numpy-based storage
+- mmCIF format I/O with ModelCIF compliance
+- Structure cropping based on various criteria
+
+The module follows the Chemical Component Dictionary (CCD) standard for
+residue identification and the mmCIF/ModelCIF specifications for file format.
+
+References:
+    mmCIF format: https://mmcif.wwpdb.org/
+    ModelCIF: https://github.com/ihmwg/ModelCIF
+    Chemical Component Dictionary: https://www.wwpdb.org/data/ccd
+"""
 from __future__ import annotations
 
 import collections
@@ -51,7 +84,83 @@ MMCIF_PREFIXES_TO_DROP_POST_AF3 = MMCIF_PREFIXES_TO_DROP_POST_PARSING + [
 
 @dataclasses.dataclass(frozen=True)
 class Biomolecule:
-    """Biomolecule structure representation."""
+    """Unified representation of biomolecular structures.
+
+    This frozen dataclass stores all information needed to represent a macromolecular
+    complex, including proteins, nucleic acids (RNA/DNA), and ligands. It provides
+    a consistent interface for working with mixed biomolecule systems in AlphaFold 3.
+
+    The data structure uses numpy arrays for efficient vectorized operations and
+    supports both experimental structures (from PDB/mmCIF) and predicted structures
+    (from AlphaFold).
+
+    Attributes:
+        atom_positions: Atomic coordinates in Angstroms, shape (N_atoms, N_atom_types, 3).
+            Each residue has a fixed-size atom array (47 positions) where unused
+            positions are masked out. The third dimension holds (x, y, z) coordinates.
+        atom_mask: Binary mask indicating which atoms are present, shape (N_atoms, N_atom_types).
+            1.0 = atom present, 0.0 = atom absent/not applicable.
+        restype: Residue type as integer index, shape (N_atoms,). Maps to residue
+            constants (0-19=amino acids, 20=unknown AA, 21-24=RNA, 25=unknown RNA,
+            26-29=DNA, 30=unknown DNA, 31=ligand/metal).
+        residue_index: Residue sequence number within its chain, shape (N_atoms,).
+            Corresponds to author-provided residue numbering, may have gaps.
+        chain_index: Chain identifier as integer, shape (N_atoms,). Groups residues
+            into distinct polymer chains or ligand groups.
+        b_factors: Temperature factors or confidence scores, shape (N_atoms, N_atom_types).
+            For predictions, stores pLDDT scores (0-100). For experimental structures,
+            stores crystallographic B-factors.
+        chemid: Chemical identifier (3-letter code), shape (N_atoms,). Examples:
+            "ALA", "GLY" (amino acids), "A", "U" (RNA), "DA", "DT" (DNA), or
+            CCD codes like "ATP", "NAG" (ligands).
+        chemtype: Chemical type index, shape (N_atoms,). Values:
+            0=protein, 1=RNA, 2=DNA, 3=ligand/ion.
+        bonds: List of inter-residue bonds (e.g., disulfide bonds, ligand connections).
+            Each bond stores partner atom IDs, chain IDs, and bond metadata.
+        is_distillation: Boolean indicating if this is a distillation target structure.
+            Used during training to identify teacher model outputs.
+        src_asym_id: Source asymmetric unit IDs for entity mapping, list of strings.
+        mmcif_metadata: Dictionary of mmCIF metadata fields preserved from parsing.
+            Enables round-trip conversion (mmCIF -> Biomolecule -> mmCIF) with
+            minimal information loss.
+        chem_comp_table: List of chemical component records describing ligands and
+            non-standard residues. Each record contains formula, name, type, etc.
+        author_cri_to_new_cri: Mapping from author chain-residue identifiers to
+            reindexed identifiers. Format: (chain_id, comp_id, seq_id) -> (new_chain, new_comp, new_seq).
+        entity_to_chain: Mapping from entity IDs to lists of chain indices.
+            Entities group identical chains (e.g., homodimers have one entity, two chains).
+        mmcif_to_author_chain: Mapping from mmCIF chain IDs to author chain IDs.
+            Handles cases where mmCIF renumbers chains differently from the author.
+
+    Example:
+        >>> # Create a simple biomolecule with one alanine residue
+        >>> biomol = Biomolecule(
+        ...     atom_positions=np.zeros((1, 47, 3)),  # 1 residue, 47 atom slots, xyz
+        ...     atom_mask=np.array([[1,1,1,1,1] + [0]*42]),  # N,CA,C,O,CB present
+        ...     restype=np.array([0]),  # Alanine = index 0
+        ...     residue_index=np.array([1]),
+        ...     chain_index=np.array([0]),
+        ...     b_factors=np.ones((1, 47)) * 50.0,
+        ...     chemid=np.array(["ALA"]),
+        ...     chemtype=np.array([0]),  # protein
+        ...     bonds=[],
+        ...     is_distillation=False,
+        ...     src_asym_id=[],
+        ...     mmcif_metadata={},
+        ...     chem_comp_table=[],
+        ...     author_cri_to_new_cri={},
+        ...     entity_to_chain={1: [0]},
+        ...     mmcif_to_author_chain={}
+        ... )
+
+    Notes:
+        - This class is frozen (immutable) to ensure data consistency
+        - All array dimensions use "N_atoms" which means total atom count across
+          all residues in the structure
+        - The 47-atom representation accommodates the largest standard residues
+          (tryptophan for proteins, complex nucleotides for RNA/DNA)
+        - Ligands use each atom as a "pseudoresidue" for flexible handling
+    """
 
     # Cartesian coordinates of atoms in angstroms. The atom types correspond to
     # residue_constants.atom_types, e.g., the first three are N, CA, CB for

@@ -1,3 +1,61 @@
+"""
+PDB Validation Dataset Clustering for AlphaFold 3.
+
+This script performs low-homology clustering on the AlphaFold 3 PDB validation dataset used
+for model selection during training. Unlike the training set clustering, this implements a
+more stringent procedure that filters out chains and interfaces with high homology to the
+training set, ensuring the validation set provides an unbiased evaluation signal.
+
+The procedure follows a modified version of the methodology in Abramson et al (2024).
+
+Multimer Selection Process:
+    1. Start with pre-filtered validation structures (see filter_pdb_val_mmcifs.py)
+    2. Filter to low-homology interfaces where BOTH chains have low homology to training:
+       - Polymers: ≤ 40% sequence identity to any training chain
+       - Ligands: ≤ 0.85 Tanimoto similarity to any training ligand
+    3. Cluster interfaces using training set clustering methodology
+    4. Sample specific numbers of interface clusters by type:
+       - Protein-protein: 600 clusters
+       - Protein-DNA: 100 clusters
+       - DNA-DNA: 100 clusters
+       - Protein-ligand: 600 clusters
+       - DNA-ligand: 50 clusters
+       - Ligand-ligand: 200 clusters
+       - Protein-RNA, RNA-RNA, DNA-RNA, RNA-ligand: All clusters
+    5. Include all low-homology chains/interfaces from selected structures
+
+Monomer Selection Process:
+    1. Start with pre-filtered monomer structures
+    2. Filter to low-homology polymers (≤ 40% identity to training)
+    3. Cluster polymers using training set methodology
+    4. Sample clusters:
+       - Protein monomers: 40 random clusters
+       - DNA and RNA monomers: All clusters
+    5. Include all low-homology chains from selected structures
+
+Homology Thresholds:
+    - Polymers (protein/RNA/DNA): 40% sequence identity
+    - Ligands: 0.85 Tanimoto similarity using Morgan fingerprints
+
+Tools:
+    - MMseqs2: For polymer sequence searching and clustering
+    - RDKit: For ligand Tanimoto similarity calculations
+    - Polars: For efficient data manipulation
+
+Output Files:
+    - filtered_all_chain_sequences.json: Low-homology chain sequences
+    - filtered_interface_chain_ids.json: Low-homology interface definitions
+    - *_chain_cluster_mapping.csv: Chain cluster assignments
+    - interface_cluster_mapping.csv: Sampled interface cluster assignments
+
+Usage:
+    python cluster_pdb_val_mmcifs.py --mmcif_dir <dir> --reference_clustering_dir <dir> --output_dir <dir>
+
+See Also:
+    - filter_pdb_val_mmcifs.py: For pre-filtering validation structures
+    - cluster_pdb_train_mmcifs.py: For training set clustering methodology
+"""
+
 # %% [markdown]
 # # Clustering AlphaFold 3 PDB Validation Dataset
 #

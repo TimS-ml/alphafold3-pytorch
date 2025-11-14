@@ -1,3 +1,23 @@
+"""
+AlphaFold3 PyTorch Implementation
+
+This module provides a PyTorch implementation of AlphaFold3, a deep learning model for
+predicting protein structure and molecular interactions. The package includes all necessary
+components for training and inference, including:
+
+- Neural network architectures (attention mechanisms, pairformer, diffusion modules)
+- Input processing and feature embedding
+- Training utilities and data loaders
+- Configuration management
+- Command-line and web interfaces
+
+Main Components:
+    - Alphafold3: Main model class for structure prediction
+    - Trainer: Training loop management
+    - AtomInput/PDBInput: Input data structures
+    - Various attention and transformer modules
+"""
+
 from alphafold3_pytorch.attention import (
     Attention,
     Attend,

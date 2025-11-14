@@ -1,4 +1,33 @@
-"""General-purpose data pipeline."""
+"""
+General-Purpose Data Pipeline for AlphaFold 3
+
+This module implements the data processing pipeline for AlphaFold 3, which prepares input features
+from various sources (sequences, MSAs, templates, structures) for the neural network model.
+
+The pipeline handles:
+- Converting raw sequence data into feature tensors
+- Processing multiple sequence alignments (MSAs) and pairing them across chains
+- Extracting and formatting template structure features
+- Parsing mmCIF structural files and assemblies
+- Creating masks and metadata for the model
+
+Key components:
+1. Sequence Features: Basic features derived from input sequences
+2. MSA Features: Multiple sequence alignment features with deletion information
+3. Template Features: Structural template features including distograms and frames
+4. mmCIF Features: Structure coordinates and metadata from PDB files
+
+Main functions:
+- make_sequence_features: Create basic sequence feature dictionary
+- make_msa_features: Process MSAs into model-ready features
+- make_template_features: Extract and align template structure features
+- make_mmcif_features: Parse mmCIF files into feature dictionaries
+- merge_chain_features: Merge features from multiple chains
+- get_assembly: Extract biological assemblies from structures
+
+The pipeline follows the AlphaFold 3 methodology as described in the supplement,
+particularly for MSA pairing (Section 2.3) and template processing (Section 2.4).
+"""
 
 import copy
 import os

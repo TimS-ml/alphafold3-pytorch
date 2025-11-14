@@ -1,4 +1,21 @@
+"""
+Comprehensive test suite for AlphaFold3 core components and architecture.
+
+This module contains extensive tests for all major components of the AlphaFold3 model,
+including:
+- Data preprocessing and feature extraction utilities
+- Loss functions and alignment algorithms
+- Neural network modules (Pairformer, MSA Module, Diffusion Transformer, etc.)
+- The complete AlphaFold3 model end-to-end
+- Confidence prediction and model selection
+- Configuration loading from YAML files
+
+These tests ensure that each component works correctly in isolation and that the
+full pipeline can train and generate structure predictions.
+"""
+
 import os
+# Enable type checking and debug mode for comprehensive error reporting
 os.environ['TYPECHECK'] = 'True'
 os.environ['DEBUG'] = 'True'
 
@@ -77,66 +94,136 @@ from alphafold3_pytorch.utils.model_utils import (
     get_indices_three_closest_atom_pos,
 )
 
+# PDB ID used for testing data loading and processing
+# This structure is used across multiple tests to ensure consistency
 DATA_TEST_PDB_ID = '721p'
 
 def test_atom_ref_pos_to_atompair_inputs():
+    """
+    Test conversion of atom reference positions to pairwise atom features.
+
+    This function tests the creation of atompair input features from atomic coordinates
+    and reference space UIDs. These pairwise features encode geometric relationships
+    between atoms, such as distances and relative positions, which are critical for
+    the model to learn spatial constraints.
+    """
+    # Create mock atom positions (16 atoms in 3D space)
     atom_ref_pos = torch.randn(16, 3)
+    # Assign all atoms to the same reference space (for simplicity)
     atom_ref_space_uid = torch.ones(16).long()
 
+    # Convert to pairwise atom features
     atompair_inputs = atom_ref_pos_to_atompair_inputs(atom_ref_pos, atom_ref_space_uid)
 
+    # Verify output shape: 16x16 pairwise features with 5 dimensions per pair
     assert atompair_inputs.shape == (16, 16, 5)
 
 def test_mean_pool_with_lens():
+    """
+    Test mean pooling operation with variable-length segments.
+
+    This utility function pools sequences into segments of specified lengths,
+    computing the mean value within each segment. This is used to aggregate
+    atom-level features into molecule-level features.
+    """
+    # Sequence with 9 elements grouped into segments of lengths [3, 4, 2]
     seq = torch.tensor([[[1.], [1.], [1.], [2.], [2.], [2.], [2.], [1.], [1.]]])
     lens = torch.tensor([[3, 4, 2]]).long()
     pooled = mean_pool_with_lens(seq, lens)
 
+    # Expected result: mean of [1,1,1]=1, mean of [2,2,2,2]=2, mean of [1,1]=1
     assert torch.allclose(pooled, torch.tensor([[[1.], [2.], [1.]]]))
 
 def test_mean_pool_with_mask():
+    """
+    Test mean pooling with masking support.
+
+    This function pools sequences into fixed-size windows while respecting
+    a mask that indicates which elements are valid. Masked elements (False values)
+    are excluded from the pooling computation. This is important for handling
+    variable-length sequences and padding.
+    """
+    # Sequence with some invalid elements (100. values should be masked out)
     seq = torch.tensor([[[1.], [100.], [1.], [2.], [2.], [100.], [1.], [1.], [100.]]])
+    # Mask indicating valid elements (False = invalid, should be ignored)
     mask = torch.tensor([[True, False, True, True, True, False, True, True, False]])
 
+    # Pool into windows of size 3, respecting the mask
     pooled, _, inverse_function = mean_pool_fixed_windows_with_mask(seq, mask, window_size = 3, return_mask_and_inverse = True)
 
+    # Verify that the inverse function can restore the original shape
     assert inverse_function(pooled).shape == seq.shape
+    # Expected result: pools valid elements into 3 groups with means [1, 2, 1]
     assert torch.allclose(pooled, torch.tensor([[[1.], [2.], [1.]]]))
 
 def test_batch_repeat_interleave():
+    """
+    Test batch-wise repeat interleave operation.
+
+    This function repeats each element in a sequence a specified number of times,
+    with the number of repetitions varying per element and per batch. This is used
+    to expand molecule-level features to atom-level features, where each molecule
+    contains a different number of atoms.
+    """
+    # Two batches with 3 elements each
     seq = torch.tensor([[[1.], [2.], [4.]], [[1.], [2.], [4.]]])
+    # Number of times to repeat each element (differs per batch)
     lens = torch.tensor([[3, 4, 2], [2, 5, 1]]).long()
     repeated = batch_repeat_interleave(seq, lens)
+
+    # Expected: first batch repeats [1,1,1,2,2,2,2,4,4], second [1,1,2,2,2,2,2,4,0]
+    # (padded with 0 to match max length)
     assert torch.allclose(repeated, torch.tensor([[[1.], [1.], [1.], [2.], [2.], [2.], [2.], [4.], [4.]], [[1.], [1.], [2.], [2.], [2.], [2.], [2.], [4.], [0.]]]))
 
 def test_smooth_lddt_loss():
+    """
+    Test the Smooth LDDT (Local Distance Difference Test) loss function.
+
+    LDDT measures the accuracy of predicted atomic positions by comparing local
+    distance patterns. The smooth version uses differentiable approximations
+    to enable gradient-based optimization. This test ensures the loss function
+    computes a scalar loss value that can be used for training.
+    """
+    # Random predicted and ground truth coordinates
     pred_coords = torch.randn(2, 100, 3)
     true_coords = torch.randn(2, 100, 3)
+    # Molecule type indicators (for nucleic acid-specific handling)
     is_dna = torch.randint(0, 2, (2, 100)).bool()
     is_rna = torch.randint(0, 2, (2, 100)).bool()
 
+    # Compute LDDT loss
     loss_fn = SmoothLDDTLoss()
     loss = loss_fn(pred_coords, true_coords, is_dna, is_rna)
 
+    # Verify output is a scalar loss value
     assert loss.numel() == 1
 
 def test_weighted_rigid_align():
+    """
+    Test weighted rigid alignment of coordinate sets.
+
+    This function tests the Kabsch algorithm for aligning two sets of 3D coordinates
+    using weighted least squares. Rigid alignment is crucial for comparing predicted
+    and true structures, as it removes arbitrary rotations and translations.
+    The weighting allows emphasizing certain atoms (e.g., backbone atoms) in the alignment.
+    """
+    # Create random predicted coordinates and weights
     pred_coords = torch.randn(2, 100, 3)
     weights = torch.rand(2, 100)
 
     align_fn = WeightedRigidAlign()
+    # Test 1: Aligning coordinates to themselves should produce no change
     aligned_coords = align_fn(pred_coords, pred_coords, weights)
 
-    # `pred_coords` should match itself without any change after alignment
-
+    # Verify RMSD is near zero (coordinates should be identical after self-alignment)
     rmsd = torch.sqrt(((pred_coords - aligned_coords) ** 2).sum(dim=-1).mean(dim=-1))
     assert (rmsd < 1e-5).all()
 
+    # Test 2: Aligning to a randomly rotated/translated version should recover original
     random_augment_fn = CentreRandomAugmentation()
     aligned_coords = align_fn(pred_coords, random_augment_fn(pred_coords), weights)
 
-    # `pred_coords` should match a random augmentation of itself after alignment
-
+    # After alignment, the augmented coordinates should match the original
     rmsd = torch.sqrt(((pred_coords - aligned_coords) ** 2).sum(dim=-1).mean(dim=-1))
     assert (rmsd < 1e-5).all()
 

@@ -1,3 +1,41 @@
+"""
+PDB Validation Dataset Filtering for AlphaFold 3.
+
+This script filters and curates mmCIF files to create the AlphaFold 3 PDB validation dataset
+used for model selection during training. The validation set consists of low-homology chains
+and interfaces from PDB structures released between 2021-10-01 and 2023-01-13.
+
+The filtering procedure follows a modified, more stringent version of the validation procedure
+outlined in Abramson et al (2024). The process includes two stages:
+
+Multimer Selection:
+    1. Select all targets released within the date range
+    2. Remove targets with >2048 tokens, >1000 chains, or resolution >4.5 Å
+    3. Generate interface chain pairs for remaining targets
+    4. Filter for low homology interfaces (see clustering script)
+
+Monomer Selection:
+    1. Select polymer monomer targets (may include ligands) within the date range
+    2. Remove targets with >2048 tokens or resolution >4.5 Å
+    3. Filter for low homology polymers (see clustering script)
+
+Filtering Criteria:
+    - Release date: 2021-10-01 to 2023-01-13
+    - Maximum tokens: 2048
+    - Maximum chains: 1000
+    - Maximum resolution: 4.5 Å
+    - Ligands in exclusion set are removed
+    - Crystallization aids are removed
+    - Hydrogens and waters are removed
+
+Usage:
+    python filter_pdb_val_mmcifs.py -i <input_dir> -a <asym_dir> -o <output_dir>
+
+See Also:
+    - cluster_pdb_val_mmcifs.py: For low-homology clustering of the filtered structures
+    - filter_pdb_train_mmcifs.py: For training dataset filtering procedures
+"""
+
 # %% [markdown]
 # # Curating AlphaFold 3 PDB Validation Dataset
 #
@@ -60,12 +98,34 @@ from scripts.filter_pdb_train_mmcifs import (
 def filter_num_tokens(
     mmcif_object: MmcifObject, max_tokens: int = 2048, exclusive_max: bool = False
 ) -> bool:
-    """Filter based on number of tokens."""
+    """
+    Filter structures based on the number of tokens (atoms).
+
+    This function converts an mmCIF structure to a Biomolecule object and counts
+    the number of atoms (tokens) in the structure. This is important for ensuring
+    structures fit within memory and computational constraints during training.
+
+    Args:
+        mmcif_object: Parsed mmCIF structure object
+        max_tokens: Maximum number of tokens allowed. Defaults to 2048.
+        exclusive_max: If True, use strict inequality (<). If False, use <= (default).
+
+    Returns:
+        bool: True if the structure passes the token count filter, False otherwise.
+
+    Note:
+        - For assembly files, the structure is used directly
+        - For non-assembly files, the biological assembly is generated first
+        - Each atom in the structure corresponds to one token
+    """
+    # Generate biomolecule representation from mmCIF object
+    # Assembly files are used directly; others need assembly generation
     biomol = (
         _from_mmcif_object(mmcif_object)
         if "assembly" in mmcif_object.file_id
         else get_assembly(_from_mmcif_object(mmcif_object))
     )
+    # Check if token count is within the specified limit
     return (
         len(biomol.atom_mask) < max_tokens
         if exclusive_max
@@ -75,7 +135,24 @@ def filter_num_tokens(
 
 @typecheck
 def filter_num_chains(mmcif_object: MmcifObject, max_chains: int = 1000) -> bool:
-    """Filter based on number of chains."""
+    """
+    Filter structures based on the number of chains.
+
+    This function counts the number of polymer and ligand chains in a structure
+    to ensure it doesn't exceed computational limits. Very large assemblies with
+    thousands of chains are typically excluded from training datasets.
+
+    Args:
+        mmcif_object: Parsed mmCIF structure object
+        max_chains: Maximum number of chains allowed. Defaults to 1000.
+
+    Returns:
+        bool: True if the number of chains is within the limit, False otherwise.
+
+    Note:
+        All chains are counted, including protein, nucleic acid, peptide, and ligand chains.
+    """
+    # Count all chains in the structure
     return len(list(mmcif_object.structure.get_chains())) <= max_chains
 
 
@@ -88,7 +165,29 @@ def prefilter_target(
     max_chains: int = 1000,
     max_resolution: float = 4.5,
 ) -> MmcifObject | None:
-    """Pre-filter a target based on various criteria."""
+    """
+    Apply initial filtering criteria to select validation dataset structures.
+
+    This function applies multiple criteria to determine if a structure should be
+    included in the validation dataset. All criteria must be satisfied for a
+    structure to pass the pre-filtering stage.
+
+    Args:
+        mmcif_object: Parsed mmCIF structure object to filter
+        min_cutoff_date: Minimum PDB release date (inclusive). Defaults to 2021-10-01.
+        max_cutoff_date: Maximum PDB release date (inclusive). Defaults to 2023-01-13.
+        max_tokens: Maximum number of atoms allowed. Defaults to 2048.
+        max_chains: Maximum number of chains allowed. Defaults to 1000.
+        max_resolution: Maximum resolution in Angstroms. Defaults to 4.5.
+
+    Returns:
+        MmcifObject | None: The original mmCIF object if it passes all filters,
+            None if it fails any filter.
+
+    Note:
+        The validation set date range (2021-10-01 to 2023-01-13) falls between
+        the training set (up to 2021-09-30) and test set (from 2023-01-14 onwards).
+    """
     target_passes_prefilters = (
         filter_pdb_release_date(
             mmcif_object, min_cutoff_date=min_cutoff_date, max_cutoff_date=max_cutoff_date
@@ -110,27 +209,59 @@ def filter_structure_with_timeout(
     keep_ligands_in_exclusion_set: bool = False,
 ):
     """
-    Given an input mmCIF file, create a new filtered mmCIF file
-    using AlphaFold 3's PDB validation dataset filtering criteria under a
-    timeout constraint.
+    Filter a single mmCIF file for the validation dataset with timeout protection.
+
+    This function applies the complete filtering pipeline to create a validation dataset
+    structure from raw PDB assembly and asymmetric unit mmCIF files. The filtering includes
+    date range checks, size constraints, removal of unwanted molecules, and cleanup of
+    problematic structural features.
+
+    The function operates under a timeout constraint to prevent hanging on problematic files.
+
+    Args:
+        filepath: Path to the input assembly mmCIF file to filter
+        output_dir: Directory where the filtered mmCIF file will be written
+        min_cutoff_date: Minimum PDB release date. Defaults to 2021-10-01.
+        max_cutoff_date: Maximum PDB release date. Defaults to 2023-01-13.
+        keep_ligands_in_exclusion_set: If True, retain ligands that would normally
+            be excluded. Defaults to False.
+
+    Returns:
+        None
+
+    Raises:
+        timeout_decorator.TimeoutError: If processing exceeds the time limit
+
+    Note:
+        The function imputes missing metadata from the asymmetric unit file, applies
+        pre-filters, removes hydrogens/waters, removes excluded ligands (unless specified),
+        removes crystallization aids, and writes the cleaned structure to a new file.
+
+        According to the AlphaFold 3 supplement, validation and test datasets should
+        remove excluded ligands, unlike the training dataset which retains them.
     """
-    # Section 2.5.4 of the AlphaFold 3 supplement
+    # Determine paths for assembly and asymmetric unit mmCIF files
+    # Assembly files contain the biological assembly; asym files contain metadata
     asym_filepath = os.path.join(
         os.path.dirname(filepath).replace("unfiltered_assembly", "unfiltered_asym"),
         os.path.basename(filepath).replace("-assembly1", ""),
     )
+    # Extract file identifier and setup output paths
     file_id = os.path.splitext(os.path.basename(filepath))[0]
+    # Organize outputs in subdirectories based on middle two characters of PDB ID
     output_file_dir = os.path.join(output_dir, file_id[1:3])
     output_filepath = os.path.join(output_file_dir, f"{file_id}.cif")
     os.makedirs(output_file_dir, exist_ok=True)
 
-    # Filtering of targets
+    # Parse both assembly and asymmetric unit mmCIF files
     mmcif_object = mmcif_parsing.parse_mmcif_object(filepath, file_id)
     asym_mmcif_object = mmcif_parsing.parse_mmcif_object(asym_filepath, file_id)
-    # NOTE: The assembly mmCIF does not contain the full header or the
-    # structure connectivity (i.e., bond) information, so we impute
-    # these from the asymmetric unit mmCIF
+
+    # Impute missing metadata from asymmetric unit
+    # Assembly files often lack header information and bond connectivity
     mmcif_object = impute_missing_assembly_metadata(mmcif_object, asym_mmcif_object)
+
+    # Apply pre-filtering criteria (date range, size, resolution)
     mmcif_object = prefilter_target(
         mmcif_object,
         min_cutoff_date=min_cutoff_date,
@@ -139,25 +270,33 @@ def filter_structure_with_timeout(
         max_chains=1000,
         max_resolution=4.5,
     )
+    # Skip structures that don't pass pre-filtering
     if not exists(mmcif_object):
         print(f"Skipping target due to prefiltering: {file_id}")
         return
-    # Filtering of bioassemblies
-    # NOTE: Here, we remove waters even though the AlphaFold 3 supplement doesn't mention removing them during filtering
+
+    # Apply bioassembly-level filters to clean up the structure
+    # Remove hydrogens and waters (not explicitly mentioned in AF3 supplement but standard practice)
     mmcif_object = remove_hydrogens(mmcif_object, remove_waters=True)
+
+    # Remove excluded ligands (standard practice for validation/test sets)
     if not keep_ligands_in_exclusion_set:
-        # NOTE: The AlphaFold 3 supplement suggests the validation and test datasets remove these (excluded) ligands
         mmcif_object = remove_excluded_ligands(mmcif_object, LIGAND_EXCLUSION_SET)
+
+    # Remove crystallization aids that don't represent biological structure
     mmcif_object = remove_crystallization_aids(mmcif_object, CRYSTALLOGRAPHY_METHODS)
+
+    # Only save if there are chains remaining after filtering
     if len(mmcif_object.chains_to_remove) < len(mmcif_object.structure):
-        # Save a filtered structure as an mmCIF file along with its latest metadata
+        # Apply all accumulated filters to the structure
         mmcif_object = mmcif_parsing.filter_mmcif(mmcif_object)
+        # Write the filtered structure to a new mmCIF file
         mmcif_writing.write_mmcif(
             mmcif_object,
             output_filepath,
-            gapless_poly_seq=True,
-            insert_orig_atom_names=True,
-            insert_alphafold_mmcif_metadata=False,
+            gapless_poly_seq=True,  # Ensure no gaps in polymer sequences
+            insert_orig_atom_names=True,  # Preserve original atom naming
+            insert_alphafold_mmcif_metadata=False,  # Don't add AF3-specific metadata
         )
         print(f"Finished filtering structure: {mmcif_object.file_id}")
 
@@ -165,8 +304,26 @@ def filter_structure_with_timeout(
 @typecheck
 def filter_structure(args: Tuple[str, str, datetime, datetime, bool]):
     """
-    Given an input mmCIF file, create a new filtered mmCIF file
-    using AlphaFold 3's PDB validation dataset filtering criteria.
+    Wrapper function for filtering a structure with error handling.
+
+    This function unpacks arguments and calls the timeout-protected filtering function.
+    It catches all exceptions to ensure batch processing continues even when individual
+    files fail, and cleans up any partially written files on failure.
+
+    Args:
+        args: Tuple containing:
+            - filepath (str): Path to input assembly mmCIF file
+            - output_dir (str): Output directory for filtered file
+            - min_cutoff_date (datetime): Minimum PDB release date
+            - max_cutoff_date (datetime): Maximum PDB release date
+            - keep_ligands_in_exclusion_set (bool): Whether to keep excluded ligands
+
+    Returns:
+        None
+
+    Note:
+        Errors are printed but don't stop the overall processing pipeline.
+        Partial output files are removed if filtering fails.
     """
     filepath, output_dir, min_cutoff_date, max_cutoff_date, keep_ligands_in_exclusion_set = args
     file_id = os.path.splitext(os.path.basename(filepath))[0]

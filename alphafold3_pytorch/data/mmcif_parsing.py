@@ -1,4 +1,31 @@
-"""An mmCIF file format parser."""
+"""
+mmCIF File Format Parser
+
+This module provides utilities for parsing macromolecular Crystallographic Information File (mmCIF) format,
+which is the standard format for structural data in the Protein Data Bank (PDB). The parser extracts
+structural information, metadata, chemical components, and bonds from mmCIF files and converts them
+into Python data structures that can be used for downstream processing in AlphaFold 3.
+
+The module handles:
+- Parsing of atom coordinates and metadata
+- Extraction of chain sequences and residue information
+- Processing of chemical component details
+- Mapping between different numbering schemes (author vs. mmCIF)
+- Assembly transformations for biological units
+- Bond information extraction
+
+Key classes:
+- MmcifObject: Main container for parsed mmCIF data
+- AtomSite: Represents an atom in the structure
+- ChemComp: Chemical component information
+- ResiduePosition: Position information for residues
+- Bond: Structural connections between atoms
+
+Main functions:
+- parse: Entry point for parsing mmCIF strings
+- parse_mmcif_object: Parse mmCIF files from disk
+- filter_mmcif: Filter parsed structures based on removal sets
+"""
 
 import dataclasses
 import functools
@@ -30,7 +57,17 @@ ChainFullId = Tuple[str, int, str]
 
 @dataclasses.dataclass(frozen=True)
 class Monomer:
-    """Represents a monomer in a polymer chain."""
+    """
+    Represents a monomer (residue) in a polymer chain.
+
+    A monomer is the basic building block of polymers such as proteins (amino acids),
+    DNA, and RNA (nucleotides). This class stores minimal identifying information
+    for each monomer in the sequence.
+
+    Attributes:
+        id: The monomer identifier (e.g., 'ALA' for alanine, 'DA' for deoxyadenosine).
+        num: The sequence number of this monomer in the chain (1-indexed).
+    """
 
     id: str
     num: int
@@ -38,7 +75,21 @@ class Monomer:
 
 @dataclasses.dataclass(frozen=True)
 class ChemComp:
-    """Represents a chemical composition."""
+    """
+    Represents a chemical component (residue or ligand) in a structure.
+
+    Chemical components describe the composition and properties of residues,
+    including standard amino acids, nucleotides, modified residues, and ligands.
+    This information is extracted from the _chem_comp category in mmCIF files.
+
+    Attributes:
+        id: Chemical component identifier (e.g., 'ALA', 'GDP', 'HOH').
+        formula: Chemical formula of the component.
+        formula_weight: Molecular weight as a string.
+        mon_nstd_flag: Flag indicating if this is a non-standard monomer ('y' or 'n').
+        name: Full chemical name of the component.
+        type: Component type (e.g., 'L-peptide linking', 'DNA linking', 'non-polymer').
+    """
 
     id: str
     formula: str
@@ -52,7 +103,26 @@ class ChemComp:
 # sequence numbers. They need not be integers.
 @dataclasses.dataclass(frozen=True)
 class AtomSite:
-    """Represents an atom site in an mmCIF file."""
+    """
+    Represents an atom site (atom record) in an mmCIF file.
+
+    Each atom site corresponds to a single atom in the structure. This class
+    stores essential metadata about the atom's position in the sequence and
+    its relationship to different numbering schemes. Note that mmCIF provides
+    both author-assigned IDs (which may be non-sequential) and internal mmCIF
+    numbering (which is sequential).
+
+    Attributes:
+        mmcif_entity_num: Entity number in mmCIF (groups chemically identical chains).
+        residue_name: Three-letter residue code (e.g., 'ALA', 'DA', 'GDP').
+        author_chain_id: Chain identifier assigned by structure authors.
+        mmcif_chain_id: Internal mmCIF chain identifier (asym_id).
+        author_seq_num: Residue number assigned by authors (may be non-sequential, stored as string).
+        mmcif_seq_num: Sequential mmCIF residue number (label_seq_id).
+        insertion_code: PDB insertion code for residues (usually space or a letter).
+        hetatm_atom: Indicates if atom is 'ATOM' or 'HETATM' record.
+        model_num: Model number (for NMR structures with multiple models).
+    """
 
     mmcif_entity_num: int
     residue_name: str
@@ -67,7 +137,29 @@ class AtomSite:
 
 @dataclasses.dataclass(frozen=True)
 class Bond:
-    """Represents a structural connection between two atoms."""
+    """
+    Represents a structural connection (bond) between two atoms.
+
+    Bonds are extracted from the _struct_conn category in mmCIF files, which
+    describes covalent bonds, disulfide bridges, and other connections between
+    atoms. Each bond involves two partner atoms with associated metadata.
+
+    Attributes:
+        ptnr1_auth_seq_id: Author-assigned sequence ID for partner 1.
+        ptnr1_auth_comp_id: Chemical component ID for partner 1 (e.g., 'CYS').
+        ptnr1_auth_asym_id: Author-assigned chain ID for partner 1.
+        ptnr1_label_atom_id: Atom name for partner 1 (e.g., 'CA', 'SG').
+        pdbx_ptnr1_label_alt_id: Alternative location indicator for partner 1.
+        ptnr2_auth_seq_id: Author-assigned sequence ID for partner 2.
+        ptnr2_auth_comp_id: Chemical component ID for partner 2.
+        ptnr2_auth_asym_id: Author-assigned chain ID for partner 2.
+        ptnr2_label_atom_id: Atom name for partner 2.
+        pdbx_ptnr2_label_alt_id: Alternative location indicator for partner 2.
+        pdbx_leaving_atom_flag: Flag indicating if this is a leaving atom.
+        pdbx_dist_value: Distance between bonded atoms (as string).
+        pdbx_role: Role of the connection (e.g., 'C-S link').
+        conn_type_id: Type of connection (e.g., 'disulf', 'covale').
+    """
 
     ptnr1_auth_seq_id: str
     ptnr1_auth_comp_id: str
@@ -90,7 +182,17 @@ class Bond:
 # Used to map SEQRES index to a residue in the structure.
 @dataclasses.dataclass(frozen=True)
 class ResiduePosition:
-    """Represents a residue position in a chain."""
+    """
+    Represents the position of a residue in a chain.
+
+    This class is used to map sequence (SEQRES) indices to actual residue positions
+    in the structure coordinates. It uses the author-assigned numbering scheme.
+
+    Attributes:
+        chain_id: The chain identifier (author-assigned).
+        residue_number: The residue sequence number (author-assigned, 1-indexed).
+        insertion_code: PDB insertion code (usually space, or a letter for insertions).
+    """
 
     chain_id: str
     residue_number: int
@@ -99,7 +201,18 @@ class ResiduePosition:
 
 @dataclasses.dataclass(frozen=True)
 class ResidueAtPosition:
-    """Represents a residue at a given position in a chain."""
+    """
+    Represents a residue at a specific position in a chain.
+
+    This class combines position information with residue identity and presence status.
+    It is used to track both observed and missing residues in the structure.
+
+    Attributes:
+        position: The position of the residue (None if residue is missing from structure).
+        name: The three-letter residue name (e.g., 'ALA', 'GDP').
+        is_missing: True if residue is in sequence but missing from coordinates.
+        hetflag: Het flag indicating residue type (' ' for standard, 'H_XXX' for hetero, 'W' for water).
+    """
 
     position: Optional[ResiduePosition]
     name: str
@@ -172,19 +285,38 @@ class ParseError(Exception):
 
 
 def mmcif_loop_to_list(prefix: str, parsed_info: MmCIFDict) -> Sequence[Mapping[str, str]]:
-    """Extracts loop associated with a prefix from mmCIF data as a list.
+    """
+    Extracts a loop structure from mmCIF data and returns it as a list of dictionaries.
 
-    Reference for loop_ in mmCIF:
+    mmCIF files use a loop_ construct to represent tabular data. This function extracts
+    all data items with a common prefix and converts them into a list where each element
+    is a dictionary representing one row of the table.
+
+    Reference for loop_ syntax in mmCIF:
       http://mmcif.wwpdb.org/docs/tutorials/mechanics/pdbx-mmcif-syntax.html
 
-    :param prefix: Prefix shared by each of the data items in the loop.
-        e.g. '_entity_poly_seq.', where the data items are _entity_poly_seq.num,
-        _entity_poly_seq.mon_id. Should include the trailing period.
-    :param parsed_info: A dict of parsed mmCIF data, e.g. _mmcif_dict from a Biopython
-        parser.
+    Args:
+        prefix: The common prefix for all data items in the loop (e.g., '_entity_poly_seq.').
+            Must include the trailing period. All keys starting with this prefix will be
+            extracted and treated as columns in the table.
+        parsed_info: A dictionary of parsed mmCIF data (typically _mmcif_dict from Biopython).
+            Keys are mmCIF data item names, values are lists of values.
 
-    :return: A list of dicts; each dict represents 1 entry from an mmCIF loop.
+    Returns:
+        A list of dictionaries where each dictionary represents one entry (row) from the
+        mmCIF loop. Dictionary keys are the full mmCIF data item names (including prefix),
+        and values are the corresponding values for that row.
+
+    Raises:
+        AssertionError: If not all columns in the loop have the same length.
+
+    Example:
+        >>> data = {'_entity.id': ['1', '2'], '_entity.type': ['polymer', 'water']}
+        >>> mmcif_loop_to_list('_entity.', data)
+        [{'_entity.id': '1', '_entity.type': 'polymer'},
+         {'_entity.id': '2', '_entity.type': 'water'}]
     """
+    # Collect all columns (keys) and their data that match the prefix
     cols = []
     data = []
     for key, value in parsed_info.items():
@@ -192,10 +324,13 @@ def mmcif_loop_to_list(prefix: str, parsed_info: MmCIFDict) -> Sequence[Mapping[
             cols.append(key)
             data.append(value)
 
+    # Verify that all columns have the same length (required for valid loop structure)
     assert all([len(xs) == len(data[0]) for xs in data]), (
         "mmCIF error: Not all loops are the same length: %s" % cols
     )
 
+    # Transpose the data: convert from column-major to row-major format
+    # Each row becomes a dictionary mapping column names to values
     return [dict(zip(cols, xs)) for xs in zip(*data)]
 
 
@@ -204,17 +339,30 @@ def mmcif_loop_to_dict(
     index: str,
     parsed_info: MmCIFDict,
 ) -> Mapping[str, Mapping[str, str]]:
-    """Extracts loop associated with a prefix from mmCIF data as a dictionary.
+    """
+    Extracts a loop structure from mmCIF data and returns it as a dictionary.
 
-    :param prefix: Prefix shared by each of the data items in the loop.
-        e.g. '_entity_poly_seq.', where the data items are _entity_poly_seq.num,
-        _entity_poly_seq.mon_id. Should include the trailing period.
-    :param index: Which item of loop data should serve as the key.
-    :param parsed_info: A dict of parsed mmCIF data, e.g. _mmcif_dict from a Biopython
-        parser.
+    This function is similar to mmcif_loop_to_list, but instead of returning a list,
+    it returns a dictionary indexed by a specified column. This is useful when you
+    need to look up entries by a specific identifier (e.g., entity ID, chain ID).
 
-    :return: A dict of dicts; each dict represents 1 entry from an mmCIF loop,
-      indexed by the index column.
+    Args:
+        prefix: The common prefix for all data items in the loop (e.g., '_entity.').
+            Must include the trailing period.
+        index: The full name of the data item to use as the dictionary key
+            (e.g., '_entity.id'). This column's values will become the keys in
+            the returned dictionary.
+        parsed_info: A dictionary of parsed mmCIF data (typically _mmcif_dict from Biopython).
+
+    Returns:
+        A dictionary where keys are values from the index column, and values are
+        dictionaries representing the full row of data for that entry.
+
+    Example:
+        >>> data = {'_entity.id': ['1', '2'], '_entity.type': ['polymer', 'water']}
+        >>> mmcif_loop_to_dict('_entity.', '_entity.id', data)
+        {'1': {'_entity.id': '1', '_entity.type': 'polymer'},
+         '2': {'_entity.id': '2', '_entity.type': 'water'}}
     """
     entries = mmcif_loop_to_list(prefix, parsed_info)
     return {entry[index]: entry for entry in entries}

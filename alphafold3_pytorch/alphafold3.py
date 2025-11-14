@@ -1,3 +1,36 @@
+"""
+AlphaFold3: Deep Learning for Biomolecular Structure Prediction
+
+This module implements the complete AlphaFold3 neural network architecture for predicting
+the 3D structures of proteins, nucleic acids, ligands, and their complexes.
+
+Architecture Overview:
+    1. Input Feature Embedder - Converts atomic/molecular features to embeddings
+    2. Template Embedder - Incorporates structural templates
+    3. MSA Module - Processes multiple sequence alignments
+    4. Pairformer Stack - Deep transformer (48 layers) for pair/single representations
+    5. Diffusion Module - Generates 3D coordinates via diffusion models
+    6. Confidence Head - Predicts pLDDT, PAE, PDE confidence metrics
+    7. Distogram Head - Predicts distance distributions
+
+Key Features:
+    - Unified architecture for proteins, RNA, DNA, ligands, metal ions
+    - Diffusion-based coordinate generation with EDM (Elucidated Diffusion Model)
+    - Multi-chain permutation alignment for chain ambiguity
+    - Support for modified residues and covalent modifications
+    - Protein/nucleotide language model integration
+
+Training:
+    - Diffusion loss with smooth LDDT and bond constraints
+    - Distogram, confidence head losses
+    - Multi-chain permutation alignment
+    - Weighted rigid alignment
+
+Reference:
+    "Accurate structure prediction of biomolecular interactions with AlphaFold 3"
+    Abramson et al., Nature, 2024
+"""
+
 from __future__ import annotations
 
 import random
@@ -6182,7 +6215,73 @@ class LossBreakdown(NamedTuple):
     diffusion_smooth_lddt: Float['']
 
 class Alphafold3(Module):
-    """ Algorithm 1 """
+    """
+    AlphaFold3: Unified deep learning model for biomolecular structure prediction.
+
+    This is the main model class implementing the complete AlphaFold3 architecture as
+    described in "Accurate structure prediction of biomolecular interactions with
+    AlphaFold 3" (Abramson et al., Nature, 2024).
+
+    The model predicts 3D structures of proteins, nucleic acids (RNA/DNA), ligands,
+    and metal ions, including their complexes. It uses a diffusion-based approach for
+    coordinate generation and includes confidence prediction heads.
+
+    Architecture (Algorithm 1 in paper):
+        1. Input Feature Embedder: Processes atomic and molecular features
+        2. Template Embedder: Incorporates structural templates (optional)
+        3. MSA Module: Processes multiple sequence alignments (optional)
+        4. Recycling: Optionally recycles representations for refinement
+        5. Pairformer Stack: 48-layer deep transformer for pair/single representations
+        6. Diffusion Module: Generates 3D coordinates via diffusion process
+        7. Confidence Head: Predicts pLDDT, PAE, PDE metrics
+        8. Distogram Head: Predicts inter-residue distance distributions
+
+    Key Parameters:
+        dim_atom_inputs: Input dimension per atom (includes element type, charge, etc.)
+        dim_template_feats: Dimension of template features
+        dim_single: Dimension of single (node) representations in trunk (default: 384)
+        dim_pairwise: Dimension of pairwise (edge) representations (default: 128)
+        dim_token: Dimension of token representations (default: 768)
+        atoms_per_window: Window size for local atom attention (default: 27)
+        num_rollout_steps: Number of diffusion steps during training rollout (default: 20)
+        diffusion_num_augmentations: Data augmentation count for diffusion training (default: 48)
+
+    Loss Weights:
+        loss_confidence_weight: Weight for confidence head loss (default: 1e-4)
+        loss_distogram_weight: Weight for distogram loss (default: 1e-2)
+        loss_diffusion_weight: Weight for diffusion loss (default: 4.0)
+
+    Usage:
+        >>> # Create model
+        >>> model = Alphafold3(
+        ...     dim_atom_inputs=77,
+        ...     dim_template_feats=108,
+        ...     atoms_per_window=27,
+        ... )
+        >>>
+        >>> # Training
+        >>> loss = model(
+        ...     atom_inputs=atom_inputs,
+        ...     atompair_inputs=atompair_inputs,
+        ...     molecule_ids=molecule_ids,
+        ...     atom_pos=ground_truth_coords,
+        ...     return_loss=True
+        ... )
+        >>>
+        >>> # Inference
+        >>> sampled_coords = model(
+        ...     atom_inputs=atom_inputs,
+        ...     atompair_inputs=atompair_inputs,
+        ...     molecule_ids=molecule_ids,
+        ...     return_loss=False
+        ... )
+
+    Note:
+        - The model supports gradient checkpointing for memory efficiency
+        - Integrates with protein/nucleotide language models for enhanced features
+        - Handles multi-chain complexes with permutation alignment
+        - Supports modified residues and covalent modifications
+    """
 
     @save_args_and_kwargs
     @typecheck

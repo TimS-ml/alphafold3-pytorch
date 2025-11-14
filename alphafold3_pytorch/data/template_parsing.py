@@ -1,3 +1,46 @@
+"""
+Template Structure Parsing and Processing Module
+
+This module handles the parsing, filtering, and feature extraction from template structures
+used in AlphaFold 3. Templates are experimental structures that are similar to the query
+sequence and provide valuable structural constraints for prediction.
+
+The module supports:
+- Parsing template alignments from M8 (BLAST) and HHR (HHsearch) format files
+- Loading template structures from mmCIF files
+- Filtering templates by identity, quality, and release date
+- Extracting structural features (distograms, unit vectors, frames)
+- Aligning template sequences to query sequences
+
+Template selection criteria:
+- Identity between 30% and 95% (excludes too-similar and too-different structures)
+- Minimum alignment length of 10 residues
+- Optional release date filtering (avoid data leakage)
+- Quality filtering based on resolution and completeness
+
+Extracted template features include:
+1. Residue types: One-hot encoded residue identities
+2. Pseudo-beta positions: Representative atom positions (CA for glycine, CB for others)
+3. Backbone frames: 3D coordinate frames from backbone atoms
+4. Pairwise distograms: Binned distance distributions between residues
+5. Unit vectors: Normalized direction vectors in backbone frames
+
+Main functions:
+- parse_m8: Parse BLAST M8 format alignment files
+- parse_hhr: Parse HHsearch HHR format alignment files
+- _extract_template_features: Extract structural features from aligned templates
+- extract_template_hmm_range: Parse HMM range from HHR files
+
+The implementation follows AlphaFold 3 Supplement Section 2.4 for template
+feature extraction and alignment.
+
+Key classes:
+- QueryToTemplateAlignError: Exception raised when template alignment fails
+
+Type aliases:
+- TEMPLATE_TYPE: Literal type for template molecule types ('protein', 'dna', 'rna')
+"""
+
 import os
 from datetime import datetime
 
@@ -282,12 +325,30 @@ def parse_hhr(
 
 
 def extract_template_hmm_range(template_hmm: str):
-    """Extract the start and end indices of the template HMM range.
-    :param template_hmm: The template HMM range string.
-    :return: A tuple containing the start and end indices of the template HMM range.
+    """
+    Extract start and end indices from an HHR template HMM range string.
+
+    HHR files contain template HMM ranges in the format "start-end (length)",
+    for example "45-123 (79)". This function parses such strings to extract
+    the numeric start and end positions.
+
+    Args:
+        template_hmm: The template HMM range string from an HHR file.
+            Format: "start-end (length)" or "start-end".
+
+    Returns:
+        A tuple of (start, end) as integers, representing the residue range
+        in the template HMM that aligns to the query.
+
+    Example:
+        >>> extract_template_hmm_range("45-123 (79)")
+        (45, 123)
+        >>> extract_template_hmm_range("1-50")
+        (1, 50)
     """
     start, end = template_hmm.split("-")
-    return int(start), int(end.split()[0])  # Split further to remove the parenthesis
+    # Split the end part to remove parenthetical length if present
+    return int(start), int(end.split()[0])
 
 
 def _extract_template_features(

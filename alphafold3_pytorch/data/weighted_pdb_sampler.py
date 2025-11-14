@@ -1,3 +1,49 @@
+"""
+Weighted PDB Sampler for Training Data Selection
+
+This module implements a weighted sampling strategy for selecting PDB structures during
+training, following the methodology described in AlphaFold 3 Supplement Section 2.5.1.
+
+The sampler balances training data by:
+1. Clustering similar chains and interfaces to reduce redundancy
+2. Assigning weights based on cluster sizes and molecular composition
+3. Down-weighting over-represented structure types
+4. Up-weighting under-represented structure types (e.g., nucleic acids, ligands)
+
+Weighting formula (from AF3 Supplement 2.5.1):
+    weight = (beta / cluster_size) * (alpha_prot * n_prot + alpha_nuc * n_nuc + alpha_ligand * n_ligand)
+
+Where:
+- beta: Base weight factor (different for chains vs interfaces)
+- cluster_size: Number of similar structures in the cluster
+- alpha_*: Molecule type weights (default: 3.0 for protein/nucleic, 1.0 for ligands)
+- n_*: Count of each molecule type in the structure
+
+Key components:
+- Chain sampling: Individual polymer chains (proteins, DNA, RNA, peptides)
+- Interface sampling: Pairs of interacting chains
+- Cluster-based weighting: Reduces sampling of redundant structures
+
+Main class:
+- WeightedPDBSampler: PyTorch Sampler for weighted PDB selection
+
+The sampler supports:
+- Multiple cluster mapping files for different molecule types
+- Filtering by PDB ID (inclusion/exclusion lists)
+- Both random and cluster-based sampling strategies
+- Configurable weighting parameters
+
+Usage:
+    sampler = WeightedPDBSampler(
+        chain_mapping_paths=['protein_chains.csv', 'nucleic_chains.csv'],
+        interface_mapping_path='interfaces.csv',
+        batch_size=64
+    )
+    for pdb_id in sampler:
+        # Train on this PDB structure
+        ...
+"""
+
 from __future__ import annotations
 
 import os
@@ -20,11 +66,31 @@ CLUSTERING_RESIDUE_MOLECULE_TYPE = Literal["protein", "rna", "dna", "ligand", "p
 
 def get_chain_count(molecule_type: CLUSTERING_RESIDUE_MOLECULE_TYPE) -> Tuple[int, int, int]:
     """
-    Returns the number of protein (or `peptide`), nucleic acid (i.e., `rna` or `dna`), and
-    ligand chains in a molecule based on its type.
+    Returns the composition counts for a given molecule type.
+
+    This function converts a molecule type string into a tuple of counts indicating
+    how many protein, nucleic acid, and ligand chains are represented. This is used
+    for calculating sampling weights based on molecular composition.
+
+    Args:
+        molecule_type: The type of molecule ('protein', 'rna', 'dna', 'ligand', or 'peptide').
+
+    Returns:
+        A tuple of (n_protein, n_nucleic_acid, n_ligand) counts.
+        - n_protein: 1 for protein/peptide, 0 otherwise
+        - n_nucleic_acid: 1 for RNA/DNA, 0 otherwise
+        - n_ligand: 1 for ligand, 0 otherwise
+
+    Raises:
+        ValueError: If molecule_type is not one of the recognized types.
 
     Example:
-        n_prot, n_nuc, n_ligand = get_chain_count("protein")
+        >>> get_chain_count("protein")
+        (1, 0, 0)
+        >>> get_chain_count("rna")
+        (0, 1, 0)
+        >>> get_chain_count("ligand")
+        (0, 0, 1)
     """
     if molecule_type == "protein":
         return 1, 0, 0
@@ -49,8 +115,36 @@ def calculate_weight(
     cluster_size: int,
 ) -> float:
     """
-    Calculates the weight of a chain or an interface according to the formula
-    provided in Section 2.5.1 of the AlphaFold 3 supplementary materials.
+    Calculates the sampling weight for a chain or interface.
+
+    This implements the weighting formula from AlphaFold 3 Supplement Section 2.5.1,
+    which balances training data by down-weighting over-represented structure types
+    and up-weighting under-represented types.
+
+    The formula is:
+        weight = (beta / cluster_size) * (alpha_prot * n_prot + alpha_nuc * n_nuc + alpha_ligand * n_ligand)
+
+    Args:
+        alphas: Dictionary of molecule type weights with keys 'prot', 'nuc', 'ligand'.
+            Typical values: {'prot': 3.0, 'nuc': 3.0, 'ligand': 1.0}
+        beta: Base weight factor. Different values are used for chains (0.5) and
+            interfaces (1.0) to balance their sampling.
+        n_prot: Number of protein/peptide molecules in this chain/interface.
+        n_nuc: Number of nucleic acid (DNA/RNA) molecules in this chain/interface.
+        n_ligand: Number of ligand molecules in this chain/interface.
+        cluster_size: Size of the cluster this structure belongs to. Larger clusters
+            (more redundant structures) receive lower weights.
+
+    Returns:
+        The sampling weight (non-negative float). Higher weights mean higher
+        probability of sampling during training.
+
+    Example:
+        >>> alphas = {'prot': 3.0, 'nuc': 3.0, 'ligand': 1.0}
+        >>> calculate_weight(alphas, beta=0.5, n_prot=1, n_nuc=0, n_ligand=0, cluster_size=100)
+        0.015  # Single protein in large cluster gets low weight
+        >>> calculate_weight(alphas, beta=0.5, n_prot=0, n_nuc=1, n_ligand=0, cluster_size=10)
+        0.15   # Nucleic acid in small cluster gets higher weight
     """
     return (beta / cluster_size) * (
         alphas["prot"] * n_prot + alphas["nuc"] * n_nuc + alphas["ligand"] * n_ligand

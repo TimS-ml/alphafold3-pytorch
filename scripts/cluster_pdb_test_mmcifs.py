@@ -1,10 +1,71 @@
+"""
+PDB Test/Evaluation Dataset Clustering for AlphaFold 3.
+
+This script performs low-homology clustering on the AlphaFold 3 PDB test (evaluation)
+dataset used for final model benchmarking. It implements a stringent filtering procedure
+that removes chains and interfaces with high homology to BOTH the training and validation
+sets, ensuring the test set provides a truly independent evaluation.
+
+The procedure follows a modified version of the methodology in Abramson et al (2024).
+
+Low-Homology Filtering:
+    The test set is filtered against both training and validation sets to create a
+    "low homology" subset for unbiased evaluation.
+
+    Homology Thresholds (more stringent than validation):
+    - Polymers (protein/RNA/DNA): ≤ 30% sequence identity
+    - Ligands: ≤ 0.7 Tanimoto similarity using Morgan fingerprints
+
+Evaluation Modes:
+    1. Intra-chain metrics:
+       - Keep polymers with ≤ 30% identity to training AND validation sets
+       - Keep ligands with ≤ 0.7 similarity to training AND validation sets
+
+    2. Interface metrics:
+       - Polymer-polymer interfaces: BOTH polymers must have ≤ 30% identity
+       - Polymer-ligand interfaces: BOTH must meet their respective thresholds
+       - An interface is filtered out if EITHER component fails the threshold
+
+Sequence Identity Definition:
+    Percent of residues in the test chain that are identical to the reference
+    (training or validation) chain, calculated using MMseqs2 alignment.
+
+Tanimoto Similarity:
+    Calculated using RDKit's Morgan fingerprints and Tanimoto similarity function
+    for comparing ligand structures.
+
+Two-Stage Filtering:
+    1. Filter test set against training set
+    2. Filter remaining structures against validation set
+    This ensures no leakage from either reference dataset.
+
+Tools:
+    - MMseqs2: For polymer sequence searching and clustering
+    - RDKit: For ligand similarity calculations
+    - Polars: For efficient data manipulation
+
+Output Files:
+    - filtered_all_chain_sequences.json: Low-homology sequences (after both filters)
+    - filtered_interface_chain_ids.json: Low-homology interfaces (after both filters)
+    - *_chain_cluster_mapping.csv: Chain cluster assignments
+    - interface_cluster_mapping.csv: Interface cluster assignments
+
+Usage:
+    python cluster_pdb_test_mmcifs.py --mmcif_dir <dir> --reference_1_clustering_dir <train_dir> --reference_2_clustering_dir <val_dir> --output_dir <dir>
+
+See Also:
+    - filter_pdb_test_mmcifs.py: For pre-filtering test structures
+    - cluster_pdb_train_mmcifs.py: For training set clustering
+    - cluster_pdb_val_mmcifs.py: For validation set clustering
+"""
+
 # %% [markdown]
 # # Clustering AlphaFold 3 PDB Evaluation Dataset
 #
 # For clustering AlphaFold 3's PDB evaluation dataset, we propose a modified (i.e., more stringent) version of the
 # evalution dataset's clustering procedure outlined in Abramson et al (2024).
 #
-# With the full evaluation set curated by the PDB test set filtering script we create a “low homology” subset
+# With the full evaluation set curated by the PDB test set filtering script we create a "low homology" subset
 # that is filtered on homology to the training and validation sets.
 # Evaluation is done either on individual chains, or on specific interfaces extracted from the full complex prediction.
 # For intra-chain metrics, we keep polymers (or ligands) that have 30% or less sequence identity

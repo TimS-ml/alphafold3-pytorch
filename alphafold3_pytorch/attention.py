@@ -1,3 +1,31 @@
+"""
+Attention Mechanisms for AlphaFold3
+
+This module implements various attention mechanisms used in the AlphaFold3 architecture,
+including multi-head attention with specialized features for protein structure prediction.
+
+Key Features:
+    - Multi-head attention with gating and pair bias
+    - Local/windowed attention for computational efficiency
+    - Flash Attention support for memory efficiency
+    - Attention soft-clamping for training stability
+    - Memory key-values for learned global context
+    - Value residual connections for improved gradient flow
+
+Main Components:
+    - Attention: High-level multi-head attention with gating
+    - Attend: Low-level attention computation with various options
+    - Helper functions for windowing and tensor manipulation
+
+The attention implementations are optimized for large biomolecular structures
+and support various memory-efficient patterns like windowing and flash attention.
+
+References:
+    - "Highly accurate protein structure prediction with AlphaFold" (AlphaFold2)
+    - "Accurate structure prediction of biomolecular interactions..." (AlphaFold3)
+    - "Flash Attention: Fast and Memory-Efficient Exact Attention..."
+"""
+
 from __future__ import annotations
 from beartype.typing import NamedTuple, Tuple
 from functools import partial
@@ -19,19 +47,22 @@ from alphafold3_pytorch.tensor_typing import (
     typecheck
 )
 
-# alias
+# Type aliases for cleaner code
 
-LinearNoBias = partial(nn.Linear, bias = False)
+LinearNoBias = partial(nn.Linear, bias = False)  # Linear layer without bias term
 
-# helpers
+# Helper functions
 
 def exists(val):
+    """Check if a value is not None."""
     return val is not None
 
 def default(v, d):
+    """Return v if it exists, otherwise return default d."""
     return v if exists(v) else d
 
 def max_neg_value(t):
+    """Get the maximum negative value for a tensor's dtype (for masking)."""
     return -torch.finfo(t.dtype).max
 
 def pack_one(t, pattern):
@@ -169,9 +200,48 @@ def full_attn_bias_to_windowed(
     attn_bias = full_pairwise_repr_to_windowed(attn_bias, window_size = window_size)
     return rearrange(attn_bias, '... 1 -> ...')
 
-# multi-head attention
+# Multi-head attention with gating and optional features
 
 class Attention(Module):
+    """
+    Multi-head attention module with gating and various AlphaFold3-specific features.
+
+    This is a flexible attention implementation that supports:
+    - Gated output for allowing attention to attend to nothing
+    - Optional local/windowed attention for efficiency
+    - Memory key-values for learned global context
+    - Attention soft-clamping for training stability
+    - Value residual connections for improved gradient flow
+
+    Ein notation used throughout:
+        b - batch
+        h - heads
+        n - sequence length
+        d - feature dimension
+        i - source sequence
+        j - context sequence (for cross-attention)
+        m - memory key/value sequence length
+
+    Args:
+        dim: Input feature dimension
+        dim_head: Dimension per attention head (default: 64)
+        heads: Number of attention heads (default: 8)
+        dropout: Dropout probability (default: 0.)
+        gate_output: Whether to gate the output (default: True)
+        query_bias: Whether to use bias in query projection (default: True)
+        window_size: Window size for local attention, None for full attention
+        num_memory_kv: Number of learned memory key-values (default: 0)
+        enable_attn_softclamp: Whether to soft-clamp attention logits (default: False)
+        attn_softclamp_value: Value for soft-clamping (default: 50.)
+        softmax_full_precision: Use full precision for softmax (default: False)
+        accept_value_residual: Accept value residual from previous layer (default: False)
+
+    Example:
+        >>> attn = Attention(dim=384, heads=8, dim_head=48)
+        >>> output = attn(seq, mask=mask)  # Self-attention
+        >>> output = attn(seq, context=context)  # Cross-attention
+    """
+
     @typecheck
     def __init__(
         self,
@@ -190,18 +260,6 @@ class Attention(Module):
         accept_value_residual = False
     ):
         super().__init__()
-        """
-        ein notation:
-
-        b - batch
-        h - heads
-        n - sequence
-        d - dimension
-        e - dimension (pairwise rep)
-        i - source sequence
-        j - context sequence
-        m - memory key / value seq
-        """
 
         dim_inner = dim_head * heads
 

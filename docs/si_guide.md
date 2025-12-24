@@ -6,37 +6,37 @@
 
 | # | SI Algorithm | 页码 | 实现位置 | 类/函数名 |
 |---|--------------|------|----------|-----------|
-| 1 | MainInferenceLoop | 9 | `alphafold3_pytorch/alphafold3.py` | `Alphafold3.forward()` (6217行) |
-| 2 | InputFeatureEmbedder | 10 | `alphafold3_pytorch/alphafold3.py` | `InputFeatureEmbedder` (4293行) |
-| 3 | RelativePositionEncoding | 10 | `alphafold3_pytorch/alphafold3.py` | `RelativePositionEncoding` (1692行) |
+| 1 | MainInferenceLoop | 9 | `alphafold3_pytorch/alphafold3.py` | `Alphafold3.forward()` (~6217行) |
+| 2 | InputFeatureEmbedder | 10 | `alphafold3_pytorch/alphafold3.py` | `InputFeatureEmbedder` (~4293行) |
+| 3 | RelativePositionEncoding | 10 | `alphafold3_pytorch/alphafold3.py` | `RelativePositionEncoding` (~1692行) |
 | 4 | one_hot | 11 | `alphafold3_pytorch/alphafold3.py` | 内置函数 `F.one_hot()` |
 | 5 | AtomAttentionEncoder | 12 | `alphafold3_pytorch/alphafold3.py` | `InputFeatureEmbedder` 中的 atom attention 部分 (4293行) |
 | 6 | AtomAttentionDecoder | 13 | `alphafold3_pytorch/alphafold3.py` | `DiffusionModule` 中的 atom decoder 部分 (2368行) |
-| 7 | AtomTransformer | 13 | `alphafold3_pytorch/alphafold3.py` | `DiffusionTransformer` (2049行) |
-| 8 | MsaModule | 15 | `alphafold3_pytorch/alphafold3.py` | `MSAModule` (1191行) |
-| 9 | OuterProductMean | 15 | `alphafold3_pytorch/alphafold3.py` | `OuterProductMean` (1057行) |
-| 10 | MSAPairWeightedAveraging | 15 | `alphafold3_pytorch/alphafold3.py` | `MSAPairWeightedAveraging` (1123行) |
-| 11 | Transition | 16 | `alphafold3_pytorch/alphafold3.py` | `Transition` (567行) |
-| 12 | TriangleMultiplicationOutgoing | 16 | `alphafold3_pytorch/alphafold3.py` | `TriangleMultiplication` (748行, outgoing=True) |
-| 13 | TriangleMultiplicationIncoming | 16 | `alphafold3_pytorch/alphafold3.py` | `TriangleMultiplication` (748行, outgoing=False) |
-| 14 | TriangleAttentionStartingNode | 17 | `alphafold3_pytorch/alphafold3.py` | `TriangleAttention` (922行, node='starting') |
-| 15 | TriangleAttentionEndingNode | 17 | `alphafold3_pytorch/alphafold3.py` | `TriangleAttention` (922行, node='ending') |
-| 16 | TemplateEmbedder | 18 | `alphafold3_pytorch/alphafold3.py` | `TemplateEmbedder` (1769行) |
-| 17 | PairformerStack | 19 | `alphafold3_pytorch/alphafold3.py` | `PairformerStack` (1450行) |
-| 18 | SampleDiffusion | 20 | `alphafold3_pytorch/alphafold3.py` | `ElucidatedAtomDiffusion.sample()` (2710行) |
-| 19 | CentreRandomAugmentation | 20 | `alphafold3_pytorch/alphafold3.py` | `CentreRandomAugmentation` (4204行) |
-| 20 | DiffusionModule | 21 | `alphafold3_pytorch/alphafold3.py` | `DiffusionModule` (2368行) |
-| 21 | DiffusionConditioning | 21 | `alphafold3_pytorch/alphafold3.py` | `PairwiseConditioning` + `SingleConditioning` (1946行, 1989行) |
-| 22 | FourierEmbedding | 22 | `alphafold3_pytorch/alphafold3.py` | `FourierEmbedding` (1928行) |
-| 23 | DiffusionTransformer | 22 | `alphafold3_pytorch/alphafold3.py` | `DiffusionTransformer` (2049行) |
-| 24 | AttentionPairBias | 22 | `alphafold3_pytorch/alphafold3.py` | `AttentionPairBias` (812行) |
-| 25 | ConditionedTransitionBlock | 23 | `alphafold3_pytorch/alphafold3.py` | `ConditionWrapper` (692行) + `Transition` (567行) |
-| 26 | AdaLN | 23 | `alphafold3_pytorch/alphafold3.py` | `AdaptiveLayerNorm` (658行) |
-| 27 | SmoothLDDTLoss | 24 | `alphafold3_pytorch/alphafold3.py` | `SmoothLDDTLoss` (3173行) |
-| 28 | weighted_rigid_align | 25 | `alphafold3_pytorch/alphafold3.py` | `WeightedRigidAlign` (3239行) |
+| 7 | AtomTransformer | 13 | `alphafold3_pytorch/alphafold3.py` | `DiffusionTransformer` (~2049行) |
+| 8 | MsaModule | 15 | `alphafold3_pytorch/alphafold3.py` | `MSAModule` (~1191行) |
+| 9 | OuterProductMean | 15 | `alphafold3_pytorch/alphafold3.py` | `OuterProductMean` (~1057行) |
+| 10 | MSAPairWeightedAveraging | 15 | `alphafold3_pytorch/alphafold3.py` | `MSAPairWeightedAveraging` (~1123行) |
+| 11 | Transition | 16 | `alphafold3_pytorch/alphafold3.py` | `Transition` (~567行) |
+| 12 | TriangleMultiplicationOutgoing | 16 | `alphafold3_pytorch/alphafold3.py` | `TriangleMultiplication` (~748行, outgoing=True) |
+| 13 | TriangleMultiplicationIncoming | 16 | `alphafold3_pytorch/alphafold3.py` | `TriangleMultiplication` (~748行, outgoing=False) |
+| 14 | TriangleAttentionStartingNode | 17 | `alphafold3_pytorch/alphafold3.py` | `TriangleAttention` (~922行, node='starting') |
+| 15 | TriangleAttentionEndingNode | 17 | `alphafold3_pytorch/alphafold3.py` | `TriangleAttention` (~922行, node='ending') |
+| 16 | TemplateEmbedder | 18 | `alphafold3_pytorch/alphafold3.py` | `TemplateEmbedder` (~1769行) |
+| 17 | PairformerStack | 19 | `alphafold3_pytorch/alphafold3.py` | `PairformerStack` (~1450行) |
+| 18 | SampleDiffusion | 20 | `alphafold3_pytorch/alphafold3.py` | `ElucidatedAtomDiffusion.sample()` (~2710行) |
+| 19 | CentreRandomAugmentation | 20 | `alphafold3_pytorch/alphafold3.py` | `CentreRandomAugmentation` (~4204行) |
+| 20 | DiffusionModule | 21 | `alphafold3_pytorch/alphafold3.py` | `DiffusionModule` (~2368行) |
+| 21 | DiffusionConditioning | 21 | `alphafold3_pytorch/alphafold3.py` | `PairwiseConditioning` + `SingleConditioning` (~1946行, 1989行) |
+| 22 | FourierEmbedding | 22 | `alphafold3_pytorch/alphafold3.py` | `FourierEmbedding` (~1928行) |
+| 23 | DiffusionTransformer | 22 | `alphafold3_pytorch/alphafold3.py` | `DiffusionTransformer` (~2049行) |
+| 24 | AttentionPairBias | 22 | `alphafold3_pytorch/alphafold3.py` | `AttentionPairBias` (~812行) |
+| 25 | ConditionedTransitionBlock | 23 | `alphafold3_pytorch/alphafold3.py` | `ConditionWrapper` (~692行) + `Transition` (~567行) |
+| 26 | AdaLN | 23 | `alphafold3_pytorch/alphafold3.py` | `AdaptiveLayerNorm` (~658行) |
+| 27 | SmoothLDDTLoss | 24 | `alphafold3_pytorch/alphafold3.py` | `SmoothLDDTLoss` (~3173行) |
+| 28 | weighted_rigid_align | 25 | `alphafold3_pytorch/alphafold3.py` | `WeightedRigidAlign` (~3239行) |
 | 29 | expressCoordinatesInFrame | 27 | `alphafold3_pytorch/alphafold3.py` | `ComputeAlignmentError` 中的坐标变换 (4147行) |
-| 30 | computeAlignmentError | 27 | `alphafold3_pytorch/alphafold3.py` | `ComputeAlignmentError` (4147行) |
-| 31 | ConfidenceHead | 28 | `alphafold3_pytorch/alphafold3.py` | `ConfidenceHead` (4597行) |
+| 30 | computeAlignmentError | 27 | `alphafold3_pytorch/alphafold3.py` | `ComputeAlignmentError` (~4147行) |
+| 31 | ConfidenceHead | 28 | `alphafold3_pytorch/alphafold3.py` | `ConfidenceHead` (~4597行) |
 
 ## 详细说明
 

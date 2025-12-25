@@ -662,7 +662,7 @@ class PreLayerNorm(Module):
         return self.fn(x, **kwargs)
 
 class AdaptiveLayerNorm(Module):
-    """ Algorithm 26 """
+    """ Algorithm 26: AdaLN - Adaptive Layer Normalization """
 
     def __init__(
         self,
@@ -687,16 +687,21 @@ class AdaptiveLayerNorm(Module):
         x: Float['b n d'],
         cond: Float['b n dc']
     ) -> Float['b n d']:
-
+        # Algorithm 26 - line 1: x_norm = LayerNorm(x)
         normed = self.norm(x)
+
+        # Algorithm 26 - line 2: cond_norm = LayerNorm(cond)
         normed_cond = self.norm_cond(cond)
 
+        # Algorithm 26 - line 3: γ = sigmoid(Linear(cond_norm)), β = LinearNoBias(cond_norm)
         gamma = self.to_gamma(normed_cond)
         beta = self.to_beta(normed_cond)
+
+        # Algorithm 26 - line 4: return x_norm · γ + β
         return normed * gamma + beta
 
 class ConditionWrapper(Module):
-    """ Algorithm 25 """
+    """ Algorithm 25: ConditionedTransitionBlock - Wraps modules with adaptive normalization """
 
     @typecheck
     def __init__(
@@ -731,8 +736,10 @@ class ConditionWrapper(Module):
         Float['b n d'] |
         tuple[Float['b n d'], Float['b _ _ _']]
     ):
+        # Algorithm 25 - line 1: x = AdaLN(x, cond)
         x = self.adaptive_norm(x, cond = cond)
 
+        # Algorithm 25 - line 2: out = Module(x)  (where Module is Attention/Transition/etc)
         out = self.fn(x, **kwargs)
 
         tuple_output = isinstance(out, tuple)
@@ -740,12 +747,16 @@ class ConditionWrapper(Module):
         if tuple_output:
             out, *rest = out
 
+        # Algorithm 25 - line 3: γ_zero = sigmoid(Linear(cond))  (with zero-initialized weights)
         gamma = self.to_adaln_zero_gamma(cond)
+
+        # Algorithm 25 - line 4: out = out · γ_zero
         out = out * gamma
 
         if tuple_output:
             out = (out, *rest)
 
+        # Algorithm 25 - line 5: return out
         return out
 
 # triangle multiplicative module

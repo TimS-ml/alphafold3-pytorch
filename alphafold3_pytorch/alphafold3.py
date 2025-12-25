@@ -1475,7 +1475,7 @@ class MSAModule(Module):
 # pairformer stack
 
 class PairformerStack(Module):
-    """ Algorithm 17 """
+    """ Algorithm 17: PairformerStack - Main trunk network """
 
     def __init__(
         self,
@@ -1570,30 +1570,39 @@ class PairformerStack(Module):
         single_repr = self.expand_streams(single_repr)
         pairwise_repr = self.expand_streams(pairwise_repr)
 
+        # Algorithm 17 - line 1: for r in [1, ..., recurrent_depth] do
         for _ in range(self.recurrent_depth):
 
             value_residual = None
             pairwise_value_residuals = None
 
+            # Algorithm 17 - line 2: for b in blocks do
             for (
                 pairwise_block,
                 pair_bias_attn,
                 single_transition
             ) in self.layers:
 
+                # Algorithm 17 - line 3: z_ij = PairwiseBlock(z_ij)
                 pairwise_repr, pairwise_attn_values = pairwise_block(pairwise_repr, mask = mask, value_residuals = pairwise_value_residuals, return_values = True)
 
+                # Algorithm 17 - line 4: s_i = AttentionPairBias(s_i, z_ij)
                 single_repr, attn_values = pair_bias_attn(single_repr, pairwise_repr = pairwise_repr, mask = mask, return_values = True, value_residual = value_residual)
 
                 if self.add_value_residual:
                     value_residual = default(value_residual, attn_values)
                     pairwise_value_residuals = default(pairwise_value_residuals, pairwise_attn_values)
 
+                # Algorithm 17 - line 5: s_i = Transition(s_i)
                 single_repr = single_transition(single_repr)
+
+            # Algorithm 17 - line 6: end for
+        # Algorithm 17 - line 7: end for
 
         single_repr = self.reduce_streams(single_repr)
         pairwise_repr = self.reduce_streams(pairwise_repr)
 
+        # Algorithm 17 - line 8: return s_i, z_ij
         return single_repr, pairwise_repr
 
     @typecheck
@@ -1915,9 +1924,11 @@ class TemplateEmbedder(Module):
         dtype = templates.dtype
         num_templates = templates.shape[1]
 
+        # Algorithm 16 - line 1: v_ij = LinearNoBias(LayerNorm(z_ij))
         pairwise_repr = self.pairwise_to_embed_input(pairwise_repr)
         pairwise_repr = rearrange(pairwise_repr, 'b i j d -> b 1 i j d')
 
+        # Algorithm 16 - line 2: t_tij = LinearNoBias(template_feats_tij) + v_ij
         templates = self.template_feats_to_embed_input(templates) + pairwise_repr
 
         templates, unpack_one = pack_one(templates, '* i j d')
@@ -1927,35 +1938,34 @@ class TemplateEmbedder(Module):
         if exists(mask):
             mask = repeat(mask, 'b n -> (b t) n', t = num_templates)
 
-        # going through the pairformer stack
-
+        # Algorithm 16 - line 3: for l in pairformer_stack_layers do
         if should_checkpoint(self, templates):
             to_layers_fn = self.to_checkpointed_layers
         else:
             to_layers_fn = self.to_layers
 
-        # layers
-
+        # Algorithm 16 - line 4: t_tij += PairwiseBlock(t_tij)
         templates = to_layers_fn(templates, mask = mask)
 
-        # final norm
-
+        # Algorithm 16 - line 5: end for
+        # Algorithm 16 - line 6: t_tij = LayerNorm(t_tij)
         templates = self.final_norm(templates)
 
         templates = unpack_one(templates)
 
-        # masked mean pool template repr
-
+        # Apply template mask
         templates = einx.where(
             'b t, b t ..., -> b t ...',
             template_mask, templates, 0.
         )
 
+        # Algorithm 16 - line 7: t_ij = mean_t(t_tij)  (masked mean pooling over templates)
         num = reduce(templates, 'b t i j d -> b i j d', 'sum')
         den = reduce(template_mask.type(dtype), 'b t -> b', 'sum')
 
         avg_template_repr = einx.divide('b i j d, b -> b i j d', num, den.clamp(min = self.eps))
 
+        # Algorithm 16 - line 8: z_ij = LinearNoBias(ReLU(t_ij))
         out = self.to_out(avg_template_repr)
 
         out = einx.where(
@@ -1963,13 +1973,14 @@ class TemplateEmbedder(Module):
             has_templates, out, 0.
         )
 
+        # Algorithm 16 - line 9: return z_ij
         return out * self.layerscale
 
 # diffusion related
 # both diffusion transformer as well as atom encoder / decoder
 
 class FourierEmbedding(Module):
-    """ Algorithm 22 """
+    """ Algorithm 22: FourierEmbedding - Embeds timesteps for diffusion """
 
     def __init__(self, dim):
         super().__init__()
@@ -1981,13 +1992,17 @@ class FourierEmbedding(Module):
         self,
         times: Float[' b'],
     ) -> Float['b d']:
-
+        # Algorithm 22 - line 1: t = reshape(t, [b, 1])
         times = rearrange(times, 'b -> b 1')
+
+        # Algorithm 22 - line 2: f = Linear(t)  (with random frozen weights)
         rand_proj = self.proj(times)
+
+        # Algorithm 22 - line 3: return cos(2π · f)
         return torch.cos(2 * pi * rand_proj)
 
 class PairwiseConditioning(Module):
-    """ Algorithm 21 """
+    """ Algorithm 21 (Part 1): PairwiseConditioning - Conditions pairwise features for diffusion """
 
     def __init__(
         self,
@@ -2019,18 +2034,23 @@ class PairwiseConditioning(Module):
         pairwise_trunk: Float['b n n dpt'],
         pairwise_rel_pos_feats: Float['b n n dpr'],
     ) -> Float['b n n dp']:
-
+        # Algorithm 21 - line 1: z_cond_ij = concat(z_trunk_ij, p_ij)
         pairwise_repr = torch.cat((pairwise_trunk, pairwise_rel_pos_feats), dim = -1)
 
+        # Algorithm 21 - line 2: z_cond_ij = LayerNorm(LinearNoBias(z_cond_ij))
         pairwise_repr = self.dim_pairwise_init_proj(pairwise_repr)
 
+        # Algorithm 21 - line 3: for t in transitions do
+        # Algorithm 21 - line 4: z_cond_ij += Transition(LayerNorm(z_cond_ij))
         for transition in self.transitions:
             pairwise_repr = transition(pairwise_repr) + pairwise_repr
 
+        # Algorithm 21 - line 5: end for
+        # Algorithm 21 - line 6: return z_cond_ij
         return pairwise_repr
 
 class SingleConditioning(Module):
-    """ Algorithm 21 """
+    """ Algorithm 21 (Part 2): SingleConditioning - Conditions single features for diffusion """
 
     def __init__(
         self,
@@ -2069,24 +2089,32 @@ class SingleConditioning(Module):
         single_trunk_repr: Float['b n dst'],
         single_inputs_repr: Float['b n dsi'],
     ) -> Float['b n (dst+dsi)']:
-
+        # Algorithm 21 - line 7: s_cond_i = concat(s_trunk_i, s_inputs_i)
         single_repr = torch.cat((single_trunk_repr, single_inputs_repr), dim = -1)
 
         assert single_repr.shape[-1] == self.dim_single
 
+        # Algorithm 21 - line 8: s_cond_i = LayerNorm(s_cond_i)
         single_repr = self.norm_single(single_repr)
 
+        # Algorithm 21 - line 9: t_emb = FourierEmbedding(0.25 * log(t / σ_data))
         fourier_embed = self.fourier_embed(0.25 * log(times / self.sigma_data, eps = self.eps))
 
+        # Algorithm 21 - line 10: t_emb = LayerNorm(t_emb)
         normed_fourier = self.norm_fourier(fourier_embed)
 
+        # Algorithm 21 - line 11: s_cond_i += LinearNoBias(t_emb)
         fourier_to_single = self.fourier_to_single(normed_fourier)
 
         single_repr = rearrange(fourier_to_single, 'b d -> b 1 d') + single_repr
 
+        # Algorithm 21 - line 12: for t in transitions do
+        # Algorithm 21 - line 13: s_cond_i += Transition(LayerNorm(s_cond_i))
         for transition in self.transitions:
             single_repr = transition(single_repr) + single_repr
 
+        # Algorithm 21 - line 14: end for
+        # Algorithm 21 - line 15: return s_cond_i
         return single_repr
 
 class DiffusionTransformer(Module):

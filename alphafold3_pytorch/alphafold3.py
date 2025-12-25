@@ -836,7 +836,7 @@ class TriangleMultiplication(Module):
 # triangle is axial attention w/ itself projected for bias
 
 class AttentionPairBias(Module):
-    """An Attention module with pair bias computation."""
+    """Algorithm 24: AttentionPairBias - Attention with pairwise bias"""
 
     def __init__(self, *, heads, dim_pairwise, window_size=None, num_memory_kv=0, **attn_kwargs):
         super().__init__()
@@ -850,8 +850,7 @@ class AttentionPairBias(Module):
             **attn_kwargs
         )
 
-        # line 8 of Algorithm 24
-
+        # Algorithm 24 - Attention bias projection layers
         self.to_attn_bias_norm = nn.LayerNorm(dim_pairwise)
         self.to_attn_bias = nn.Sequential(LinearNoBias(dim_pairwise, heads), Rearrange("b ... h -> b h ..."))
 
@@ -904,32 +903,32 @@ class AttentionPairBias(Module):
                 not_exists(windowed_attn_bias) or not windowed_attn_bias
             ), "Cannot pass in windowed attention bias if no `window_size` is set for `AttentionPairBias`."
 
-        # attention bias preparation with further addition from pairwise repr
-
+        # Algorithm 24 - line 1: Prepare attention bias
+        # If attn_bias provided, reshape for heads; otherwise initialize to 0
         if exists(attn_bias):
             attn_bias = rearrange(attn_bias, "b ... -> b 1 ...")
         else:
             attn_bias = 0.0
 
+        # Algorithm 24 - line 2: b^h_ij = LinearNoBias(LayerNorm(z_ij))
+        # Compute pairwise representation bias for attention
         if pairwise_repr.numel() > MAX_CONCURRENT_TENSOR_ELEMENTS:
-            # create a stub tensor and normalize it to maintain gradients to `to_attn_bias_norm`
+            # Memory-efficient path for large tensors
             stub_pairwise_repr = torch.zeros((b, dp), dtype=dtype, device=device)
             stub_attn_bias_norm = self.to_attn_bias_norm(stub_pairwise_repr) * 0.0
 
-            # adjust `attn_bias_norm` dimensions to match `pairwise_repr`
             attn_bias_norm = pairwise_repr + (
                 stub_attn_bias_norm[:, None, None, None, :]
                 if windowed_pairwise
                 else stub_attn_bias_norm[:, None, None, :]
             )
 
-            # apply bias transformation
             attn_bias = self.to_attn_bias(attn_bias_norm) + attn_bias
         else:
             attn_bias = self.to_attn_bias(self.to_attn_bias_norm(pairwise_repr)) + attn_bias
 
-        # attention
-
+        # Algorithm 24 - line 3: s_i = Attention(s_i, bias=b^h_ij)
+        # Apply attention with pairwise bias
         out, values = self.attn(
             single_repr,
             attn_bias = attn_bias,
@@ -938,8 +937,7 @@ class AttentionPairBias(Module):
             **kwargs
         )
 
-        # whether to return values for value residual learning
-
+        # Algorithm 24 - line 4: return s_i (and optionally values for residual learning)
         if not return_values:
             return out
 

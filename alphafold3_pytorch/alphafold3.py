@@ -552,9 +552,10 @@ class LinearNoBiasThenOuterSum(Module):
 
 # classic feedforward, SwiGLU variant
 # they name this 'transition' in their paper
-# Algorithm 11
+# Algorithm 11: Transition - Feed-forward network with SwiGLU activation
 
 class SwiGLU(Module):
+    """SwiGLU activation function used in Transition"""
     @typecheck
     def forward(
         self,
@@ -565,6 +566,7 @@ class SwiGLU(Module):
         return F.silu(gates) * x
 
 class Transition(Module):
+    """Algorithm 11: Transition Layer"""
     def __init__(
         self,
         *,
@@ -585,7 +587,11 @@ class Transition(Module):
         self,
         x: Float['... d']
     ) -> Float['... d']:
-
+        # Algorithm 11 - line 1: a = LinearNoBias_{dh}(LayerNorm(x))
+        # Algorithm 11 - line 2: b = LinearNoBias_{dh}(LayerNorm(x))
+        # Algorithm 11 - line 3: x = LinearNoBias_d(SwiGLU(a, b))
+        # Algorithm 11 - line 4: return x
+        # Note: LayerNorm is applied outside this module in practice
         return self.ff(x)
 
 # dropout
@@ -746,6 +752,7 @@ class ConditionWrapper(Module):
 # seems to be unchanged from alphafold2
 
 class TriangleMultiplication(Module):
+    """Algorithms 12 & 13: TriangleMultiplication (Outgoing/Incoming)"""
 
     @typecheck
     def __init__(
@@ -791,18 +798,26 @@ class TriangleMultiplication(Module):
             mask = to_pairwise_mask(mask)
             mask = rearrange(mask, '... -> ... 1')
 
+        # Algorithm 12/13 - line 1: a_ijk = LinearNoBias_c(LayerNorm(z_ij))
+        # Algorithm 12/13 - line 2: b_ijk = LinearNoBias_c(LayerNorm(z_ij))
         left, right = self.left_right_proj(x).chunk(2, dim = -1)
 
         if exists(mask):
             left = left * mask
             right = right * mask
 
+        # Algorithm 12 - line 3 (outgoing): z_ij = ∑_k a_ikc · b_jkc
+        # Algorithm 13 - line 3 (incoming): z_ij = ∑_k a_kjc · b_kic
         out = einsum(left, right, self.mix_einsum_eq)
 
+        # Algorithm 12/13 - line 4: z_ij = LayerNorm(z_ij)
         out = self.to_out_norm(out)
 
+        # Algorithm 12/13 - line 5: g_ij = sigmoid(LinearNoBias(z_ij))
         out_gate = self.out_gate(x).sigmoid()
 
+        # Algorithm 12/13 - line 6: z_ij = LinearNoBias(z_ij) · g_ij
+        # Algorithm 12/13 - line 7: return z_ij
         return self.to_out(out) * out_gate
 
 # there are two types of attention in this paper, triangle and attention-pair-bias
@@ -920,6 +935,8 @@ class AttentionPairBias(Module):
         return out, values
 
 class TriangleAttention(Module):
+    """Algorithms 14 & 15: TriangleAttention (Starting/Ending Node)"""
+
     def __init__(
         self,
         *,
@@ -953,10 +970,11 @@ class TriangleAttention(Module):
         Float['b n n d'] |
         tuple[Float['b n n d'], Tensor]
     ):
-
+        # Algorithm 15 - line 1: If ending node, transpose z_ij -> z_ji
         if self.need_transpose:
             pairwise_repr = rearrange(pairwise_repr, 'b i j d -> b j i d')
 
+        # Algorithm 14/15 - line 2: b_ij^h = LinearNoBias(LayerNorm(z_ij))
         attn_bias = self.to_attn_bias(pairwise_repr)
 
         batch_repeat = pairwise_repr.shape[1]
@@ -967,6 +985,7 @@ class TriangleAttention(Module):
 
         pairwise_repr, unpack_one = pack_one(pairwise_repr, '* n d')
 
+        # Algorithm 14/15 - line 3: z_ij = Attention(z_ij, bias=b_ij^h)
         out, values = self.attn(
             pairwise_repr,
             mask = mask,
@@ -977,11 +996,14 @@ class TriangleAttention(Module):
 
         out = unpack_one(out)
 
+        # Algorithm 15 - line 4: If ending node, transpose back z_ji -> z_ij
         if self.need_transpose:
             out = rearrange(out, 'b j i d -> b i j d')
 
+        # Algorithm 14/15 - line 5: Apply dropout
         out = self.dropout(out)
 
+        # Algorithm 14/15 - line 6: return z_ij
         if not return_values:
             return out
 
@@ -1055,7 +1077,7 @@ class PairwiseBlock(Module):
 # msa module
 
 class OuterProductMean(Module):
-    """ Algorithm 9 """
+    """ Algorithm 9: OuterProductMean """
 
     def __init__(
         self,
@@ -1079,16 +1101,17 @@ class OuterProductMean(Module):
         mask: Bool['b n'] | None = None,
         msa_mask: Bool['b s'] | None = None
     ) -> Float['b n n dp']:
-        
+
         dtype = msa.dtype
 
+        # Algorithm 9 - line 1: m̄_si = LayerNorm(m_si)
         msa = self.norm(msa)
 
-        # line 2
-
+        # Algorithm 9 - line 2: a_si = LinearNoBias_c(m̄_si), b_si = LinearNoBias_c(m̄_si)
         a, b = self.to_hidden(msa).chunk(2, dim = -1)
 
-        # maybe masked mean for outer product
+        # Algorithm 9 - line 3: O_ij = mean_s(a_si ⊗ b_sj)
+        # Compute outer product mean with optional masking
 
         if exists(msa_mask):
             a = einx.multiply('b s i d, b s -> b s i d', a, msa_mask.type(dtype))
@@ -1104,11 +1127,10 @@ class OuterProductMean(Module):
             outer_product = einsum(a, b, 'b s i d, b s j e -> b i j d e')
             outer_product_mean = outer_product / num_msa
 
-        # flatten
-
+        # Algorithm 9 - line 4: O_ij = Flatten(O_ij)
         outer_product_mean = rearrange(outer_product_mean, '... d e -> ... (d e)')
 
-        # masking for pairwise repr
+        # Apply masking for pairwise representation
 
         if exists(mask):
             mask = to_pairwise_mask(mask)
@@ -1116,12 +1138,15 @@ class OuterProductMean(Module):
                 'b i j d, b i j', outer_product_mean, mask.type(dtype)
             )
 
+        # Algorithm 9 - line 5: z_ij = Linear(O_ij)
         pairwise_repr = self.to_pairwise_repr(outer_product_mean)
+
+        # Algorithm 9 - line 6: return z_ij
         return pairwise_repr
 
 
 class MSAPairWeightedAveraging(Module):
-    """ Algorithm 10 """
+    """ Algorithm 10: MSAPairWeightedAveraging """
 
     def __init__(
         self,
@@ -1163,33 +1188,32 @@ class MSAPairWeightedAveraging(Module):
         mask: Bool['b n'] | None = None,
     ) -> Float['b s n d']:
 
+        # Algorithm 10 - line 1: v_sij^h = LinearNoBias(LayerNorm(m_sj))
+        # Algorithm 10 - line 2: g_sij^h = sigmoid(LinearNoBias(LayerNorm(m_sj)))
         values, gates = self.msa_to_values_and_gates(msa)
         gates = gates.sigmoid()
 
-        # line 3
-
+        # Algorithm 10 - line 3: b_ij^h = LinearNoBias(LayerNorm(z_ij))
         b = self.pairwise_repr_to_attn(pairwise_repr)
 
         if exists(mask):
             mask = rearrange(mask, 'b j -> b 1 1 j')
             b = b.masked_fill(~mask, max_neg_value(b))
 
-        # line 5
-
+        # Algorithm 10 - line 4: w_ij^h = softmax_j(b_ij^h)
         weights = b.softmax(dim = -1)
 
-        # line 6
-
+        # Algorithm 10 - line 5: m_si = ∑_j w_ij^h · g_sij^h · v_sij^h
         out = einsum(weights, values, 'b h i j, b h s j d -> b h s i d')
 
         out = out * gates
 
-        # combine heads
-
+        # Algorithm 10 - line 6: m_si = LinearNoBias(concat_h(m_si))
+        # Algorithm 10 - line 7: return m_si
         return self.to_out(out)
 
 class MSAModule(Module):
-    """ Algorithm 8 """
+    """ Algorithm 8: MsaModule - Processes multiple sequence alignments """
 
     def __init__(
         self,
@@ -1273,7 +1297,7 @@ class MSAModule(Module):
         mask: Bool['b n'] | None = None,
         msa_mask: Bool['b s'] | None = None,
     ) -> Float['b n n dp']:
-
+        # Algorithm 8 - line 1: for l in layers do
         for (
             outer_product_mean,
             msa_pair_weighted_avg,
@@ -1281,17 +1305,20 @@ class MSAModule(Module):
             pairwise_block
         ) in self.layers:
 
-            # communication between msa and pairwise rep
-
+            # Algorithm 8 - line 2: z_ij += OuterProductMean(m_si)
             pairwise_repr = outer_product_mean(msa, mask = mask, msa_mask = msa_mask) + pairwise_repr
 
+            # Algorithm 8 - line 3: m_si += MSAPairWeightedAveraging(m_si, z_ij)
             msa = msa_pair_weighted_avg(msa = msa, pairwise_repr = pairwise_repr, mask = mask) + msa
+
+            # Algorithm 8 - line 4: m_si += Transition(m_si)
             msa = msa_transition(msa) + msa
 
-            # pairwise block
-
+            # Algorithm 8 - line 5: z_ij = PairwiseBlock(z_ij)
             pairwise_repr = pairwise_block(pairwise_repr = pairwise_repr, mask = mask)
 
+        # Algorithm 8 - line 6: end for
+        # Algorithm 8 - line 7: return z_ij
         return pairwise_repr
 
     @typecheck
@@ -1717,37 +1744,51 @@ class RelativePositionEncoding(Module):
         device = additional_molecule_feats.device
 
         res_idx, token_idx, asym_id, entity_id, sym_id = additional_molecule_feats.unbind(dim = -1)
-        
+
         diff_res_idx = einx.subtract('b i, b j -> b i j', res_idx, res_idx)
         diff_token_idx = einx.subtract('b i, b j -> b i j', token_idx, token_idx)
         diff_sym_id = einx.subtract('b i, b j -> b i j', sym_id, sym_id)
 
+        # Algorithm 3 - line 1: b^same_chain_ij = (f^asym_id_i == f^asym_id_j)
         mask_same_chain = einx.subtract('b i, b j -> b i j', asym_id, asym_id) == 0
+        # Algorithm 3 - line 2: b^same_residue_ij = (f^residue_index_i == f^residue_index_j)
         mask_same_res = diff_res_idx == 0
+        # Algorithm 3 - line 3: b^same_entity_ij = (f^entity_id_i == f^entity_id_j)
         mask_same_entity = einx.subtract('b i, b j -> b i j 1', entity_id, entity_id) == 0
-        
+
+        # Algorithm 3 - line 4: d^residue_ij = clip(f^residue_index_i - f^residue_index_j + r_max, 0, 2·r_max) if b^same_chain_ij else 2·r_max + 1
         d_res = torch.where(
             mask_same_chain,
             torch.clip(diff_res_idx + self.r_max, 0, 2*self.r_max),
             2*self.r_max + 1
         )
 
+        # Algorithm 3 - line 5: a^rel_pos_ij = one_hot(d^residue_ij, [0, ..., 2·r_max + 1])
+        # Algorithm 3 - line 6: d^token_ij = clip(f^token_index_i - f^token_index_j + r_max, 0, 2·r_max) if b^same_chain_ij and b^same_residue_ij else 2·r_max + 1
         d_token = torch.where(
             mask_same_chain * mask_same_res,
             torch.clip(diff_token_idx + self.r_max, 0, 2*self.r_max),
             2*self.r_max + 1
         )
 
+        # Algorithm 3 - line 7: a^rel_token_ij = one_hot(d^token_ij, [0, ..., 2·r_max + 1])
+        # Algorithm 3 - line 8: d^chain_ij = clip(f^sym_id_i - f^sym_id_j + s_max, 0, 2·s_max) if not b^same_chain_ij else 2·s_max + 1
         d_chain = torch.where(
             ~mask_same_chain,
             torch.clip(diff_sym_id + self.s_max, 0, 2*self.s_max),
             2*self.s_max + 1
         )
-        
+
+        # Algorithm 3 - line 9: a^rel_chain_ij = one_hot(d^chain_ij, [0, ..., 2·s_max + 1])
+        # Algorithm 4: one_hot - One-hot encoding with nearest bin
         def onehot(x, bins):
+            # Algorithm 4 - line 1: p = 0
+            # Algorithm 4 - line 2: b = arg min(|x - v_bins|)
             dist_from_bins = einx.subtract('... i, j -> ... i j', x, bins)
             indices = dist_from_bins.abs().min(dim = -1, keepdim = True).indices
+            # Algorithm 4 - line 3: p_b = 1
             one_hots = F.one_hot(indices.long(), num_classes = len(bins))
+            # Algorithm 4 - line 4: return p
             return one_hots.type(dtype)
 
         r_arange = torch.arange(2*self.r_max + 2, device = device)
@@ -1757,6 +1798,7 @@ class RelativePositionEncoding(Module):
         a_rel_token = onehot(d_token, r_arange)
         a_rel_chain = onehot(d_chain, s_arange)
 
+        # Algorithm 3 - line 10: p_ij = LinearNoBias(concat([a^rel_pos_ij, a^rel_token_ij, b^same_entity_ij, a^rel_chain_ij]))
         out, _ = pack((
             a_rel_pos,
             a_rel_token,
@@ -1764,6 +1806,7 @@ class RelativePositionEncoding(Module):
             a_rel_chain
         ), 'b i j *')
 
+        # Algorithm 3 - line 11: return {p_ij}
         return self.out_embedder(out)
 
 class TemplateEmbedder(Module):
@@ -4373,6 +4416,8 @@ class InputFeatureEmbedder(Module):
 
         w = self.atoms_per_window
 
+        # Algorithm 2 - line 1: {ai}, _, _, _, _ = AtomAttentionEncoder({f*}, ∅, ∅, ∅, catom = 128, catompair = 16, ctoken = 384)
+        # Embed per-atom features and apply atom transformer
         atom_feats = self.to_atom_feats(atom_inputs)
         atompair_feats = self.to_atompair_feats(atompair_inputs)
 
@@ -4405,12 +4450,15 @@ class InputFeatureEmbedder(Module):
 
         atompair_feats = self.atompair_feats_mlp(atompair_feats) + atompair_feats
 
+        # Aggregate per-atom representation to per-token representation {ai}
         single_inputs = self.atom_feats_to_pooled_token(
             atom_feats = atom_feats,
             atom_mask = atom_mask,
             molecule_atom_lens = molecule_atom_lens
         )
 
+        # Algorithm 2 - line 2: si = concat(ai, f^restype_i, f^profile_i, f^deletion_mean_i)
+        # Concatenate the per-token features
         if exists(additional_token_feats):
             single_inputs = torch.cat((
                 single_inputs,
@@ -4434,6 +4482,7 @@ class InputFeatureEmbedder(Module):
         single_init = single_init + single_molecule_embed
         pairwise_init = pairwise_init + pairwise_molecule_embed
 
+        # Algorithm 2 - line 3: return {si}
         return EmbeddedInputs(single_inputs, single_init, pairwise_init, atom_feats, atompair_feats)
 
 # distogram head
@@ -6982,6 +7031,9 @@ class Alphafold3(Module):
         seq_len = molecule_atom_lens.shape[-1]
 
         # embed inputs
+        # Algorithm 1 - line 1: {s_inputs_i} = InputFeatureEmbedder({f*})
+        # Algorithm 1 - line 2: s_init_i = LinearNoBias(s_inputs_i)
+        # Algorithm 1 - line 3: z_init_ij = LinearNoBias(s_inputs_i) + LinearNoBias(s_inputs_j)
 
         if verbose:
             logger.info("Embedding inputs...")
@@ -7116,6 +7168,7 @@ class Alphafold3(Module):
             single_init = single_init + single_nlm_init
 
         # relative positional encoding
+        # Algorithm 1 - line 4: z_init_ij += RelativePositionEncoding({f*})
 
         if verbose:
             logger.info("Applying relative positional encoding...")
@@ -7140,6 +7193,7 @@ class Alphafold3(Module):
         pairwise_init = pairwise_init + relative_position_encoding
 
         # token bond features
+        # Algorithm 1 - line 5: z_init_ij += LinearNoBias(f_token_bonds_ij)
 
         if verbose:
             logger.info("Applying token bond features...")
@@ -7167,6 +7221,7 @@ class Alphafold3(Module):
         pairwise_mask = to_pairwise_mask(mask)
 
         # init recycled single and pairwise
+        # Algorithm 1 - line 6: {ẑ_ij}, {ŝ_i} = 0, 0
 
         detach_when_recycling = default(detach_when_recycling, self.detach_when_recycling)
         maybe_recycling_detach = torch.detach if detach_when_recycling else identity
@@ -7175,6 +7230,7 @@ class Alphafold3(Module):
         single = pairwise = None
 
         # for each recycling step
+        # Algorithm 1 - line 7: for all c ∈ [1, . . . , Ncycle] do
 
         if verbose:
             logger.info("Starting recycling steps...")
@@ -7182,6 +7238,8 @@ class Alphafold3(Module):
         for i in range(num_recycling_steps):
 
             # handle recycled single and pairwise if not first step
+            # Algorithm 1 - line 8: z_ij = z_init_ij + LinearNoBias(LayerNorm(ẑ_ij))
+            # Algorithm 1 - line 11: s_i = s_init_i + LinearNoBias(LayerNorm(ŝ_i))
 
             recycled_single = recycled_pairwise = 0.
 
@@ -7199,6 +7257,7 @@ class Alphafold3(Module):
             # else go through main transformer trunk from alphafold2
 
             # templates
+            # Algorithm 1 - line 9: {z_ij} += TemplateEmbedder({f*}, {z_ij})
 
             if verbose:
                 logger.info(f"Applying template embeddings in recycling step {i}...")
@@ -7223,6 +7282,7 @@ class Alphafold3(Module):
             pairwise = embedded_template + pairwise
 
             # msa
+            # Algorithm 1 - line 10: {z_ij} += MsaModule({f_msa_Si}, {z_ij}, {s_inputs_i})
 
             if verbose:
                 logger.info(f"Applying MSA embeddings in recycling step {i}...")
@@ -7240,6 +7300,8 @@ class Alphafold3(Module):
                 pairwise = embedded_msa + pairwise
 
             # main attention trunk (pairformer)
+            # Algorithm 1 - line 12: {s_i}, {z_ij} = PairformerStack({s_i}, {z_ij})
+            # Algorithm 1 - line 13: {ŝ_i}, {ẑ_ij} ← {s_i}, {z_ij}
 
             if verbose:
                 logger.info(f"Applying pairformer in recycling step {i}...")
@@ -7249,6 +7311,7 @@ class Alphafold3(Module):
                 pairwise_repr = pairwise,
                 mask = mask
             )
+            # Algorithm 1 - line 14: end for
 
         # determine whether to return loss if any labels were to be passed in
         # otherwise will sample the atomic coordinates
@@ -7269,6 +7332,7 @@ class Alphafold3(Module):
         return_loss = default(return_loss, can_return_loss)
 
         # if neither atom positions or any labels are passed in, sample a structure and return
+        # Algorithm 1 - line 15: {⃗x_pred_l} = SampleDiffusion({f*}, {s_inputs_i}, {s_i}, {z_ij})
 
         if verbose:
             logger.info("Sampling atomic coordinates...")
@@ -7312,8 +7376,10 @@ class Alphafold3(Module):
                 ]
 
             if not return_confidence_head_logits:
+                # Algorithm 1 - line 18: return {⃗x_pred_l}, {p_plddt_l}, {p_pae_ij}, {p_pde_ij}, {p_resolved_l}, {p_distogram_ij}
                 return sampled_atom_pos
 
+            # Algorithm 1 - line 16: {p_plddt_l}, {p_pae_ij}, {p_pde_ij}, {p_resolved_l} = ConfidenceHead({s_inputs_i}, {s_i}, {z_ij}, {⃗x_pred_l})
             confidence_head_logits = self.confidence_head(
                 single_repr = single.detach(),
                 single_inputs_repr = single_inputs.detach(),
@@ -7329,6 +7395,7 @@ class Alphafold3(Module):
             returned_logits = confidence_head_logits
 
             if return_distogram_head_logits:
+                # Algorithm 1 - line 17: p_distogram_ij = DistogramHead(z_ij)
                 distogram_head_logits = self.distogram_head(pairwise.clone().detach())
 
                 returned_logits = Alphafold3Logits(
@@ -7336,6 +7403,7 @@ class Alphafold3(Module):
                     distance = distogram_head_logits
                 )
 
+            # Algorithm 1 - line 18: return {⃗x_pred_l}, {p_plddt_l}, {p_pae_ij}, {p_pde_ij}, {p_resolved_l}, {p_distogram_ij}
             return sampled_atom_pos, returned_logits
 
         # if being forced to return loss, but do not have sufficient information to return losses, just return 0
@@ -7399,6 +7467,7 @@ class Alphafold3(Module):
 
             distance_labels = torch.where(distogram_mask, distance_labels, ignore)
 
+            # Algorithm 1 - line 17: p_distogram_ij = DistogramHead(z_ij) (during training)
             distogram_logits = self.distogram_head(
                 pairwise,
                 molecule_atom_lens = molecule_atom_lens,
